@@ -1,0 +1,7 @@
+streamlit>=1.30
+streamlit-aggrid>=1.0
+yfinance>=0.2.40
+pandas>=2.2
+lxml>=5.2
+requests>=2.31
+pytest>=8.2
