@@ -3,7 +3,8 @@
 A Python project that analyzes market data to make real-time stock suggestions.
 The core capability is an **interactive dashboard** that ranks S&P 500 stocks by a
 **composite valuation score** (blending valuation, profitability, growth, and financial
-health), powered by internal ranking/scoring functions.
+health), powered by internal ranking/scoring functions. Now includes an **LLM-powered
+AI Assistant** for deep-dive market analysis using Claude or ChatGPT.
 
 ## Status
 
@@ -17,6 +18,11 @@ health), powered by internal ranking/scoring functions.
 | Dashboard: adjustable composite-score weights (sidebar sliders) | ✅ Done |
 | Dashboard: click a row OR search any ticker for a full metric breakdown | ✅ Done |
 | Dashboard: price history chart (1D/1W/1M/6M/1Y/5Y/MAX) in the details view | ✅ Done |
+| LLM Assistant: Market Segment / Sector Recommendation mode | ✅ Done |
+| LLM Assistant: Deep Dive Stock Picks with pro/con analysis | ✅ Done |
+| LLM Assistant: Supports Claude (Anthropic) and ChatGPT (OpenAI) | ✅ Done |
+| LLM Assistant: Prebuilt expert prompts + live market context injection | ✅ Done |
+| LLM Assistant: Streaming responses + markdown export | ✅ Done |
 | Persistence & historical tracking | 🔜 Planned |
 
 ## Architecture
@@ -40,11 +46,23 @@ app/
                    # for the composite-ranked table, get_ranked_stocks_dataframe() for the
                    # simple PE ranking, and get_stock_details() for the full grouped metric
                    # breakdown of a single ticker.
-dashboard.py       # Streamlit + AgGrid dashboard (the UI entry point).
+  llm/
+    __init__.py    # Public exports: MarketAssistant, Input types, ProviderType
+    providers.py   # LLM abstraction: ClaudeProvider, OpenAIProvider, model registry
+    prompts.py     # Prebuilt expert prompts for sector + stock modes
+    context.py     # Builds live market context strings from S&P 500 data
+    assistant.py   # Orchestrator: ties context + prompts + provider -> analysis
+dashboard.py       # Streamlit dashboard with navigation:
+                   #  - Market Ranking page (original)
+                   #  - AI Deep Dive Assistant page (LLM modes)
+.streamlit/
+  secrets.toml.example  # Template for API keys (ANTHROPIC_API_KEY / OPENAI_API_KEY)
 tests/
-  test_ranking.py  # Unit tests for ranking logic (no network).
-  test_service.py  # Unit tests for the service layer (data source stubbed).
-requirements.txt   # Runtime + dev dependencies.
+  test_ranking.py       # Unit tests for ranking logic (no network).
+  test_service.py       # Unit tests for the service layer (data source stubbed).
+  test_scoring.py       # Tests for composite scoring.
+  test_llm_assistant.py  # Tests for LLM prompts, providers, context, assistant (mocked)
+requirements.txt   # Runtime + dev dependencies (now includes anthropic, openai).
 ```
 
 ### Data flow
@@ -158,7 +176,96 @@ Div Yield %, Beta, Market Cap. Rows are sorted by composite Score (best first) b
 uv run pytest
 ```
 
+## LLM Assistant (NEW) — AI Market Deep Dive
+
+A separate page (sidebar navigation **AI Deep Dive**) provides LLM-powered analysis with two modes:
+
+### 1. Market Segment / Sector Recommendation
+**Goal:** Recommend best market segments to invest in given current trends, news + quantitative snapshot. LLM does own sentiment and valuation inference.
+
+**Inputs (user-provided):**
+- Trends (e.g., AI CapEx, GLP-1, reshoring)
+- News (Fed policy, earnings, geopolitics)
+- Risk Tolerance, Time Horizon, Investment Style, Additional Preferences
+
+**Quantitative context auto-injected (fixed top 20, no weight tweaking):**
+- Top 20 ranked stocks
+- Sector summary: avg score, avg valuation, count, top tickers per sector
+- Broad market stats: avg P/E, score distribution, sector representation
+
+**Output structure (institutional quality, markdown):**
+- Executive Summary
+- Macro & Market Regime Context (links qualitative + quantitative)
+- Ranked Top 5 Sectors table + deep dive on top 3 (thesis, catalysts, valuation check, quant support, risks, exposure)
+- Sectors to Avoid
+- Risks & Hedges
+- Action Plan (allocation %, triggers)
+- Disclaimer (not financial advice)
+
+### 2. Deep Dive Stock Picks with Pro/Con
+**Goal:** Select best stock picks with balanced pro/con analysis.
+
+**Inputs:**
+- Tickers (multiselect from S&P 500 + free text, or auto-pick top ranked if blank)
+- Investment thesis, trends/news, must-have/must-avoid filters
+- Focus sector, risk tolerance, benchmark, num picks
+
+**Quantitative context auto-injected:**
+- Top 20 ranked snapshot (fixed)
+- Per-ticker fundamentals (Company, Valuation, Price, Profitability & Growth, Financials, Dividends, Trading)
+- Sector context, valuation percentiles
+
+**Output per ticker:**
+- One-liner + metrics table vs sector/S&P
+- Moat analysis (Porter)
+- Financial health, valuation, catalysts, Pros/Bull (3-5 bullets), Cons/Bear & Risks (3-5 bullets), Conviction & Fit
+- Final comparative ranking table + portfolio construction guidance
+
+### LLM Provider Support
+- **Claude 4.8:** `claude-opus-4-20250514` (fixed, displayed as Claude 4.8)
+- **GPT 5.5:** `gpt-5` (fixed, displayed as GPT 5.5)
+- Switch via UI radio between Claude 4.8 / GPT 5.5 (no model selection, temp, max tokens - fixed internally)
+- API key resolution: Saved via Save button (session) > UI paste override > `.streamlit/secrets.toml` > env vars `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`
+- Save button persists key in session_state for the session
+- Streaming support: toggle live token streaming for better UX
+- Export: Download result as Markdown
+- Prompt transparency: Expander shows full system prompt + user template
+
+### Prebuilt Custom Prompts (in `app/llm/prompts.py`)
+- `SECTOR_SYSTEM_PROMPT`: Senior strategist persona, sector rotation theory, macro-to-micro, requires balanced upside/downside
+- `STOCK_SYSTEM_PROMPT`: Senior equity research analyst persona, fundamental + moat + DCF sanity, requires pro/con + conviction levels
+- Templates engineered with chain-of-thought guidance, structured markdown, data-grounding instructions, disclaimer requirement
+
+### Architecture
+```
+User UI (dashboard.py AI page)
+  -> MarketAssistant (assistant.py)
+     -> build_full_context() (context.py): live S&P 500 + fundamentals -> strings
+     -> build_sector/stock_prompt() (prompts.py): system+user prompts with injected context
+     -> LLMProvider (providers.py): ClaudeProvider or OpenAIProvider -> generate/stream
+  -> Result markdown rendered + download
+```
+
+### Setup for LLM Assistant
+1. Install deps: `pip install -r requirements.txt` (now includes anthropic, openai)
+2. Get API key:
+   - Claude: https://console.anthropic.com
+   - OpenAI: https://platform.openai.com/api-keys
+3. Provide key via one of:
+   ```bash
+   export ANTHROPIC_API_KEY=sk-ant-...
+   export OPENAI_API_KEY=sk-...
+   # or create .streamlit/secrets.toml from secrets.toml.example
+   # or paste directly in UI (password field, not persisted)
+   ```
+4. Run dashboard: `streamlit run dashboard.py`, navigate to AI Deep Dive
+5. Choose provider/model, fill qualitative inputs, click Generate
+
+### Cost note
+LLM calls cost money per token. Context includes ~top 20 stocks + sector summary + fundamentals for selected tickers, ~2k-4k input tokens. Use Haiku / GPT-4o-mini for cheapest experimentation.
+
 ## Notes
 
 - The **first** load warms the cache by fetching the full S&P 500, so it takes a while.
   Subsequent loads within the 15-minute TTL are fast.
+- LLM analysis is for education only, not financial advice. Outputs may hallucinate — verify metrics against detail view.
