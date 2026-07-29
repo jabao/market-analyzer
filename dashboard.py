@@ -4,9 +4,10 @@ and AI-powered market deep dives.
 Run with:
     streamlit run dashboard.py
 
-Two pages via sidebar navigation:
+Three pages via sidebar navigation:
   - Market Ranking (original composite scoring)
   - AI Deep Dive Assistant (LLM-powered sector & stock analysis: Claude 4.8 / GPT 5.5)
+  - Portfolio Tracker (manage personal stock portfolio with live prices)
 
 Fixed models: Claude 4.8 (claude-opus-4-20250514) and GPT 5.5 (gpt-5).
 No market context is passed to LLM - only user inputs + LLM's own knowledge.
@@ -17,8 +18,10 @@ from __future__ import annotations
 
 import math
 import os
+import time
 from datetime import datetime
 
+import yfinance as yf
 import pandas as pd
 import streamlit as st
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
@@ -27,6 +30,17 @@ from app import scoring
 from app.llm import AnalysisMode, MarketAssistant
 from app.llm.prompts import PROMPT_PREVIEWS, AnalysisMode as PromptMode
 from app.llm.providers import ProviderType, get_default_model_for_provider
+from app.portfolio_db import init_database as init_portfolio_db
+from app.portfolio_service import (
+    add_portfolio_holding,
+    calculate_portfolio_summary,
+    clear_price_cache,
+    delete_all_transactions_for_ticker,
+    delete_portfolio_holding,
+    get_ticker_positions,
+    get_current_prices_batch,
+    get_portfolio_holdings,
+)
 from app.service import (
     DEFAULT_PRICE_RANGE,
     PRICE_RANGES,
@@ -614,23 +628,330 @@ def render_ai_assistant_page():
     )
 
 
+# ───────────────────────────── Portfolio Tracker Page ─────────────────────────────
+
+
+def render_portfolio_page():
+    """Render the portfolio tracking page with holdings table, add form, and live prices."""
+    st.title("💼 Portfolio Tracker")
+    st.caption(
+        "Track your stock portfolio with real-time price updates. "
+        "Prices refresh automatically every 30 seconds or click Refresh."
+    )
+
+    # Auto-refresh setup (every 30 seconds)
+    if "portfolio_last_refresh" not in st.session_state:
+        st.session_state["portfolio_last_refresh"] = time.time()
+
+    current_time = time.time()
+    if current_time - st.session_state["portfolio_last_refresh"] >= 30:
+        clear_price_cache()
+        st.session_state["portfolio_last_refresh"] = current_time
+        st.rerun()
+
+    # Initialize database on first load
+    init_portfolio_db()
+
+    # Layout columns for metrics
+    cols = st.columns(4)
+
+    # Get all holdings
+    holdings = get_portfolio_holdings()
+    tickers = [h["ticker"] for h in holdings]
+
+    # Fetch live prices
+    prices = get_current_prices_batch(tickers) if tickers else {}
+
+    # Calculate summary
+    if holdings:
+        summary = calculate_portfolio_summary(holdings, prices)
+        rows = summary["rows"]
+        total_cost = summary["total_cost_basis"]
+        total_value = summary["total_current_value"]
+        total_gain_loss = summary["total_gain_loss"]
+        total_gain_pct = summary["total_gain_loss_pct"]
+    else:
+        rows = []
+        total_cost = 0.0
+        total_value = 0.0
+        total_gain_loss = 0.0
+        total_gain_pct = 0.0
+
+    # Display summary metrics at top
+    cols[0].metric("Total Holdings", len(holdings))
+    cols[1].metric("Total Cost Basis", format_large(total_cost, currency=True))
+    cols[2].metric("Current Value", format_large(total_value, currency=True))
+
+    # Format gain/loss with color
+    if total_gain_loss >= 0:
+        gl_display = f"+{format_large(total_gain_loss, currency=True)} (+{total_gain_pct:.2f}%)"
+    else:
+        gl_display = f"{format_large(total_gain_loss, currency=True)} ({total_gain_pct:.2f}%)"
+    cols[3].metric("Net Gain/Loss", gl_display)
+
+    st.divider()
+
+    # Show holdings table (if there are any)
+    col_refresh, _ = st.columns([1, 3])
+    with col_refresh:
+        if st.button("🔄 Refresh Prices", use_container_width=True, key="portfolio_refresh"):
+            clear_price_cache()
+            st.rerun()
+
+    if holdings:
+        st.subheader("Your Holdings")
+        
+        # Build DataFrame for display
+        df = pd.DataFrame(rows)
+
+        # Configure grid options for portfolio
+        builder = GridOptionsBuilder.from_dataframe(df)
+        builder.configure_default_column(sortable=True, filterable=True, resizable=True)
+        builder.configure_selection(selection_mode="single", use_checkbox=False)
+        builder.configure_pagination(enabled=False)
+
+        # Format numeric columns
+        numeric_cols = ["Shares", "Avg Purchase Price", "Current Price", "Cost Basis", "Current Value", "Gain/Loss", "Gain/Loss %"]
+        for col in numeric_cols:
+            if col == "Gain/Loss %":
+                expr = f"params.value === null ? '' : params.value.toFixed(2) + '%'"
+            elif col in ["Current Price", "Purchase Price"]:
+                expr = "params.value === null || isNaN(params.value) ? '-' : '$' + params.value.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})"
+            elif col == "Shares":
+                expr = "params.value === null ? '' : params.value.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})"
+            else:
+                expr = "params.value === null || isNaN(params.value) ? '-' : '$' + Math.abs(params.value).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})"
+            builder.configure_column(col, type=["numericColumn"], valueFormatter=_formatter(expr))
+
+        # Purchase dates is now a formatted string, not a single date
+        builder.configure_column("Purchase Dates", width=250)
+
+        options = builder.build()
+
+        # Render the portfolio table
+        grid_response = AgGrid(
+            df,
+            gridOptions=options,
+            height=500,
+            theme="streamlit",
+            fit_columns_on_grid_load=True,
+            allow_unsafe_jscode=True,
+            update_mode=GridUpdateMode.SELECTION_CHANGED,
+            key="portfolio_grid",
+        )
+
+        # Delete/view buttons for selected row
+        selected = grid_response.get("selected_rows")
+        if selected is not None and len(selected) > 0:
+            selected_ticker = selected.iloc[0].get("ticker_key")
+            if selected_ticker:
+                st.caption(f"Selected: **{selected_ticker}**")
+                
+                col_view, col_delete = st.columns(2)
+                with col_view:
+                    if st.button("📋 View Transactions", key="view_txn_btn"):
+                        st.session_state["viewing_transactions"] = selected_ticker
+                        st.rerun()
+                with col_delete:
+                    if st.button("🗑️ Delete All Positions for " + selected_ticker, type="secondary", key="delete_holding_btn"):
+                        confirm_del = st.text_input("Type '" + selected_ticker + "' to confirm:", key="confirm_del_input")
+                        if confirm_del == selected_ticker:
+                            if delete_all_transactions_for_ticker(selected_ticker):
+                                st.success(f"All positions for {selected_ticker} deleted!")
+                                st.rerun()
+                            else:
+                                st.error(f"Failed to delete {selected_ticker}.")
+
+        st.divider()
+
+        # View individual transactions for a ticker
+        viewing = st.session_state.get("viewing_transactions")
+        if viewing:
+            if st.button("← Back to Portfolio", key="back_to_portfolio"):
+                st.session_state.pop("viewing_transactions", None)
+                st.rerun()
+
+            st.subheader(f"📋 Transaction History: {viewing}")
+            transactions = get_ticker_positions(viewing)
+
+            if not transactions:
+                st.info("No transactions found for this ticker.")
+            else:
+                txn_df = pd.DataFrame([{
+                    "ID": t["id"],
+                    "Date": t["purchase_date"],
+                    "Shares": t["shares"],
+                    "Price": t["purchase_price"],
+                    "Total Value": round(t["shares"] * t["purchase_price"], 2),
+                    "Brokerage": t.get("brokerage") or ""
+                } for t in transactions])
+
+                col_delete_txn, _ = st.columns([1, 4])
+                with col_delete_txn:
+                    delete_txn_id = st.number_input("Transaction ID to delete:", min_value=1, key="delete_txn_id")
+
+                grid_col, delete_btn_col = st.columns([3, 1])
+                with grid_col:
+                    st.dataframe(txn_df, hide_index=True, use_container_width=False)
+
+                with delete_btn_col:
+                    if st.button("Delete TXN", type="secondary", key="delete_single_txn"):
+                        if delete_portfolio_holding(delete_txn_id):
+                            st.success("Transaction deleted!")
+                            st.rerun()
+                        else:
+                            st.error("Failed to delete transaction.")
+
+            st.divider()
+
+    elif not viewing:
+        # No holdings - show empty state message
+        st.info("👆 No holdings yet. Use 'Add New Holding' below to get started!")
+        st.divider()
+
+    # Add new holding form appears at the end regardless of holdings status
+    render_add_holding_form()
+
+
+def render_add_holding_form():
+    """Render the add holding form as a helper function."""
+    with st.expander("➕ Add New Holding", expanded=True):
+        col1, col2 = st.columns(2)
+
+        with col1:
+            add_ticker_raw = st.text_input(
+                "Ticker Symbol",
+                placeholder="e.g., AAPL, MSFT (required)",
+                key="add_ticker",
+                help="Stock ticker symbol (required, will be converted to uppercase)",
+            )
+            add_ticker = add_ticker_raw.strip().upper() if add_ticker_raw else ""
+
+            add_brokerage = st.text_input(
+                "Brokerage",
+                placeholder="e.g., Fidelity, Robinhood, E*TRADE",
+                key="add_brokerage",
+                help="Which brokerage holds this position (optional)",
+            ).strip()
+
+        with col2:
+            add_shares = st.number_input(
+                "Number of Shares",
+                min_value=0.01,
+                value=1.0,
+                step=0.01,
+                key="add_shares",
+                help="Number of shares owned",
+            )
+
+            add_purchase_price = st.number_input(
+                "Purchase Price ($)",
+                min_value=0.01,
+                value=100.0,
+                step=0.01,
+                key="add_price",
+                help="Average purchase price per share",
+            )
+
+            add_purchase_date = st.date_input(
+                "Purchase Date",
+                value=datetime.now(),
+                key="add_date",
+                help="Date when you purchased these shares",
+            )
+
+        col_save, _ = st.columns([2, 1])
+        with col_save:
+            if st.button("💾 Add Holding", type="primary", use_container_width=True, key="btn_add_holding"):
+                if not add_ticker:
+                    st.error("Please enter a ticker symbol.")
+                elif add_shares <= 0:
+                    st.error("Please enter a valid number of shares.")
+                elif add_purchase_price <= 0:
+                    st.error("Please enter a valid purchase price.")
+                else:
+                    try:
+                        holding_id = add_portfolio_holding(
+                            ticker=add_ticker,
+                            shares=float(add_shares),
+                            purchase_date=add_purchase_date,
+                            purchase_price=float(add_purchase_price),
+                            brokerage=add_brokerage if add_brokerage else None,
+                        )
+                        st.success(f"Holding added successfully! (ID: {holding_id})")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to add holding: {e}")
+
+    st.divider()
+    st.caption(
+        "💡 Tip: Prices are fetched from Yahoo Finance and cached for 30 seconds. "
+        "Same tickers are automatically combined with weighted average price. "
+        "Click Refresh to force an immediate update. Click a row's ticker to view/delete individual transactions."
+    )
+
+
 def main() -> None:
     st.set_page_config(page_title="Market Analyzer", layout="wide", page_icon="📊")
 
-    with st.sidebar:
-        st.title("Navigation")
-        page = st.radio(
-            "Go to",
-            ["📊 Market Ranking", "🤖 AI Deep Dive"],
-            index=0,
-            key="nav_page",
-        )
-        st.divider()
-        st.caption("Market Analyzer v2 — LLM Assistant")
-        st.caption("Claude 4.8 / GPT 5.5 — no market data passed")
+    # Initialize default page in session state
+    if "current_page" not in st.session_state:
+        st.session_state["current_page"] = "📊 Market Ranking"
 
-    if page.startswith("📊"):
+    # Apply custom CSS for tab-like buttons
+    st.markdown("""
+    <style>
+    .stButton button {
+        border-radius: 8px !important;
+        padding: 0.5rem 1rem !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    # Top navigation tabs (centered)
+    tab_col1, tab_col2, tab_col3 = st.columns([1, 1, 1], gap="small")
+    with tab_col1:
+        btn1 = st.button("📊 Market Ranking", use_container_width=True, key="tab_ranking", 
+                       help="View ranked S&P 500 stocks by composite score")
+    with tab_col2:
+        btn2 = st.button("💼 Portfolio Tracker", use_container_width=True, key="tab_portfolio",
+                        help="Track your personal stock portfolio")
+    with tab_col3:
+        btn3 = st.button("🤖 AI Deep Dive", use_container_width=True, key="tab_ai",
+                        help="LLM-powered market analysis")
+
+    # Handle navigation
+    if btn1:
+        st.session_state["current_page"] = "📊 Market Ranking"
+        st.rerun()
+    elif btn2:
+        st.session_state["current_page"] = "💼 Portfolio Tracker"
+        st.rerun()
+    elif btn3:
+        st.session_state["current_page"] = "🤖 AI Deep Dive"
+        st.rerun()
+
+    # Highlight current page with text
+    current_page = st.session_state.get("current_page", "📊 Market Ranking")
+    st.markdown(f"<div style='text-align:center; color:#666;'>Currently viewing: <strong>{current_page}</strong></div>", 
+                unsafe_allow_html=True)
+    st.divider()
+
+    # Sidebar with info only (no navigation)
+    with st.sidebar:
+        st.markdown("---")
+        st.caption("Market Analyzer v3")
+        st.caption("Portfolio • Live Prices • LLM")
+        st.caption("ℹ️ Tips:")
+        st.caption("• Prices cached 30 seconds")
+        st.caption("• Same tickers combine automatically")
+        st.caption("• Dates format: M/D/YY (shares)")
+
+    # Render selected page
+    if "📊" in current_page:
         render_market_ranking_page()
+    elif "💼" in current_page:
+        render_portfolio_page()
     else:
         render_ai_assistant_page()
 
