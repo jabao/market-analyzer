@@ -7,7 +7,7 @@ Supports multiple purchase dates displayed as "(date (shares), ...)"."""
 from __future__ import annotations
 
 import sqlite3
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 DATABASE_PATH = Path(__file__).resolve().parent.parent / "portfolio.db"
@@ -24,6 +24,38 @@ def get_connection() -> sqlite3.Connection:
 DB_PATH = DATABASE_PATH
 
 
+def _stored_purchase_date(value) -> str:
+    if value is None:
+        return ""
+    return str(value)
+
+
+def parse_purchase_date(value: str) -> str:
+    """Parse a user-entered purchase date into ISO format, or empty string."""
+    value = (value or "").strip()
+    if not value:
+        return ""
+
+    # Users may edit the aggregate display value "7/30/26 (3.25)" directly.
+    value = value.split("(", 1)[0].strip()
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%m-%d-%Y", "%m-%d-%y"):
+        try:
+            return datetime.strptime(value, fmt).date().isoformat()
+        except ValueError:
+            continue
+    raise ValueError("Use YYYY-MM-DD or M/D/YY.")
+
+
+def _table_columns(cursor: sqlite3.Cursor, table_name: str) -> set[str]:
+    cursor.execute(f"PRAGMA table_info({table_name})")
+    return {row[1] for row in cursor.fetchall()}
+
+
+def _ensure_column(cursor: sqlite3.Cursor, table_name: str, column_name: str, column_definition: str) -> None:
+    if column_name not in _table_columns(cursor, table_name):
+        cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}")
+
+
 def init_database() -> None:
     """Initialize the database schema, creating tables if they don't exist."""
     with get_connection() as conn:
@@ -37,9 +69,19 @@ def init_database() -> None:
                 purchase_date DATE NOT NULL,
                 purchase_price REAL NOT NULL,
                 brokerage TEXT,
+                source TEXT NOT NULL DEFAULT 'manual',
+                external_item_id TEXT,
+                external_account_id TEXT,
+                external_security_id TEXT,
+                imported_at DATETIME,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        _ensure_column(cursor, "transactions", "source", "TEXT NOT NULL DEFAULT 'manual'")
+        _ensure_column(cursor, "transactions", "external_item_id", "TEXT")
+        _ensure_column(cursor, "transactions", "external_account_id", "TEXT")
+        _ensure_column(cursor, "transactions", "external_security_id", "TEXT")
+        _ensure_column(cursor, "transactions", "imported_at", "DATETIME")
         conn.commit()
 
 
@@ -58,10 +100,63 @@ def add_transaction(
             INSERT INTO transactions (ticker, shares, purchase_date, purchase_price, brokerage)
             VALUES (?, ?, ?, ?, ?)
             """,
-            (ticker.upper(), shares, str(purchase_date), purchase_price, brokerage),
+            (ticker.upper(), shares, _stored_purchase_date(purchase_date), purchase_price, brokerage),
         )
         conn.commit()
         return cursor.lastrowid
+
+
+def replace_imported_transactions(
+    transactions: list[dict],
+    *,
+    source: str,
+    brokerage: str,
+) -> int:
+    """Replace imported transactions for a brokerage/source pair.
+
+    Manual rows are left alone because they keep ``source='manual'``.
+    Returns the number of imported rows inserted.
+    """
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM transactions WHERE source = ? AND brokerage = ?",
+            (source, brokerage),
+        )
+        cursor.executemany(
+            """
+            INSERT INTO transactions (
+                ticker,
+                shares,
+                purchase_date,
+                purchase_price,
+                brokerage,
+                source,
+                external_item_id,
+                external_account_id,
+                external_security_id,
+                imported_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    row["ticker"].upper(),
+                    row["shares"],
+                    _stored_purchase_date(row.get("purchase_date")),
+                    row["purchase_price"],
+                    brokerage,
+                    source,
+                    row.get("external_item_id"),
+                    row.get("external_account_id"),
+                    row.get("external_security_id"),
+                    row.get("imported_at"),
+                )
+                for row in transactions
+            ],
+        )
+        conn.commit()
+        return len(transactions)
 
 
 def get_all_transactions() -> list[dict]:
@@ -71,6 +166,42 @@ def get_all_transactions() -> list[dict]:
         cursor.execute("SELECT * FROM transactions ORDER BY ticker, purchase_date")
         rows = cursor.fetchall()
         return [dict(row) for row in rows]
+
+
+def update_purchase_date_for_ticker(ticker: str, purchase_date_text: str) -> int:
+    """Update editable purchase dates from the holdings grid.
+
+    Aggregated grid edits target blank Plaid-imported rows first. If there are no blank
+    Plaid rows and the ticker has exactly one transaction, update that single row.
+    Returns the number of rows changed.
+    """
+    purchase_date = parse_purchase_date(purchase_date_text)
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE transactions
+            SET purchase_date = ?
+            WHERE ticker = ?
+              AND source = 'plaid'
+              AND (purchase_date IS NULL OR purchase_date = '')
+            """,
+            (purchase_date, ticker.upper()),
+        )
+        affected = cursor.rowcount
+
+        if affected == 0:
+            cursor.execute("SELECT id FROM transactions WHERE ticker = ?", (ticker.upper(),))
+            rows = cursor.fetchall()
+            if len(rows) == 1:
+                cursor.execute(
+                    "UPDATE transactions SET purchase_date = ? WHERE id = ?",
+                    (purchase_date, rows[0]["id"]),
+                )
+                affected = cursor.rowcount
+
+        conn.commit()
+        return affected
 
 
 def delete_transaction(transaction_id: int) -> bool:
@@ -103,7 +234,7 @@ def get_aggregated_holdings() -> list[dict]:
                     da.ticker,
                     da.purchase_date,
                     SUM(da.shares) as shares,
-                    AVG(da.purchase_price) as purchase_price
+                    SUM(da.shares * da.purchase_price) / SUM(da.shares) as purchase_price
                 FROM transactions da
                 GROUP BY da.ticker, da.purchase_date
             )
@@ -112,11 +243,14 @@ def get_aggregated_holdings() -> list[dict]:
                 SUM(da.shares) as total_shares,
                 SUM(da.shares * da.purchase_price) / SUM(da.shares) as avg_purchase_price,
                 GROUP_CONCAT(
-                    printf('%d/%d/%d', 
-                        CAST(substr(da.purchase_date, 6, 2) AS INTEGER),
-                        CAST(substr(da.purchase_date, 9, 2) AS INTEGER),
-                        CAST(substr(da.purchase_date, 1, 4) AS INTEGER) % 100
-                    ) || ' (' || CAST(da.shares AS INTEGER) || ')',
+                    CASE
+                        WHEN da.purchase_date IS NULL OR da.purchase_date = '' THEN NULL
+                        ELSE printf('%d/%d/%d',
+                            CAST(substr(da.purchase_date, 6, 2) AS INTEGER),
+                            CAST(substr(da.purchase_date, 9, 2) AS INTEGER),
+                            CAST(substr(da.purchase_date, 1, 4) AS INTEGER) % 100
+                        ) || ' (' || RTRIM(RTRIM(printf('%.6f', da.shares), '0'), '.') || ')'
+                    END,
                     ', '
                 ) as purchase_dates_str,
                 NULL as brokerage

@@ -14,7 +14,10 @@ from app.portfolio_db import (
     get_ticker_transactions,
     init_database,
     delete_transaction,
+    replace_imported_transactions,
+    update_purchase_date_for_ticker,
 )
+from app.plaid_integration import PLAID_SOURCE, ROBINHOOD_BROKERAGE, PlaidPortfolioImport
 
 _PRICE_CACHE: dict[str, tuple[float, float | None]] = {}
 _PRICE_TTL_SECONDS = 30
@@ -37,6 +40,20 @@ def add_portfolio_holding(
     Same tickers are automatically aggregated with weighted average price.
     Ticker is used as display name (stock_name removed for simplicity)."""
     return add_transaction(ticker, shares, purchase_date, purchase_price, brokerage)
+
+
+def import_plaid_portfolio(import_result: PlaidPortfolioImport, brokerage: str = ROBINHOOD_BROKERAGE) -> int:
+    """Replace existing Plaid-imported brokerage rows with freshly imported holdings."""
+    return replace_imported_transactions(
+        import_result.transactions,
+        source=PLAID_SOURCE,
+        brokerage=brokerage,
+    )
+
+
+def update_holding_purchase_date(ticker: str, purchase_date_text: str) -> int:
+    """Persist an edited purchase date from the holdings grid."""
+    return update_purchase_date_for_ticker(ticker, purchase_date_text)
 
 
 def get_portfolio_holdings() -> list[dict]:

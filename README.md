@@ -23,6 +23,7 @@ AI Assistant** for deep-dive market analysis using Claude or ChatGPT.
 | LLM Assistant: Supports Claude (Anthropic) and ChatGPT (OpenAI) | ✅ Done |
 | LLM Assistant: Prebuilt expert prompts + live market context injection | ✅ Done |
 | LLM Assistant: Streaming responses + markdown export | ✅ Done |
+| Portfolio tracker: manual holdings + Robinhood import via Plaid | ✅ Done |
 | Persistence & historical tracking | 🔜 Planned |
 
 ## Architecture
@@ -42,6 +43,12 @@ app/
   scoring.py       # Pure composite scoring model: blends valuation, profitability,
                    # growth, and financial-health metrics into a 0-100 score via
                    # percentile ranking, with adjustable dimension weights.
+  portfolio_db.py  # SQLite persistence for manual transactions and imported holdings.
+  portfolio_service.py  # Portfolio aggregation, live prices, gain/loss, import helpers.
+  plaid_integration.py  # Plaid Link token creation, token exchange, holdings fetch,
+                        # and Robinhood holdings-to-portfolio mapping.
+  plaid_link_component.py
+  plaid_link_frontend/  # Minimal Streamlit custom component for Plaid Link.
   service.py       # The internal API: get_scored_stocks_dataframe() / build_scored_dataframe()
                    # for the composite-ranked table, get_ranked_stocks_dataframe() for the
                    # simple PE ranking, and get_stock_details() for the full grouped metric
@@ -54,15 +61,16 @@ app/
     assistant.py   # Orchestrator: ties context + prompts + provider -> analysis
 dashboard.py       # Streamlit dashboard with navigation:
                    #  - Market Ranking page (original)
+                   #  - Portfolio Tracker page (manual + Robinhood/Plaid import)
                    #  - AI Deep Dive Assistant page (LLM modes)
 .streamlit/
-  secrets.toml.example  # Template for API keys (ANTHROPIC_API_KEY / OPENAI_API_KEY)
+  secrets.toml.example  # Template for API keys (LLM + Plaid)
 tests/
   test_ranking.py       # Unit tests for ranking logic (no network).
   test_service.py       # Unit tests for the service layer (data source stubbed).
   test_scoring.py       # Tests for composite scoring.
   test_llm_assistant.py  # Tests for LLM prompts, providers, context, assistant (mocked)
-requirements.txt   # Runtime + dev dependencies (now includes anthropic, openai).
+requirements.txt   # Runtime + dev dependencies (now includes anthropic, openai, plaid-python).
 ```
 
 ### Data flow
@@ -144,6 +152,31 @@ uv run streamlit run dashboard.py
 ```
 
 Streamlit opens it in your browser (default http://localhost:8501).
+
+## Robinhood Import Via Plaid
+
+The Portfolio Tracker can import current Robinhood investment holdings through Plaid
+Link. Configure Plaid credentials via environment variables or `.streamlit/secrets.toml`:
+
+```bash
+export PLAID_CLIENT_ID=...
+export PLAID_SECRET=...
+export PLAID_ENV=sandbox  # sandbox, development, or production
+# Optional if your network requires a custom certificate bundle:
+export PLAID_CA_BUNDLE=/path/to/ca-bundle.pem
+# Optional if Plaid calls are slow on your network:
+export PLAID_CONNECT_TIMEOUT_SECONDS=10
+export PLAID_READ_TIMEOUT_SECONDS=30
+```
+
+Then open **Portfolio Tracker → Import From Robinhood → Start Robinhood Login**.
+Imported Plaid rows are stored in the SQLite portfolio database with `source='plaid'`.
+Each new Robinhood import replaces previous Plaid-imported Robinhood rows and leaves
+manual holdings untouched.
+
+Plaid provides current positions rather than tax lots, so the app derives average
+purchase price from Plaid cost basis when available and uses the import date as the
+position date.
 
 ### Dashboard columns
 
