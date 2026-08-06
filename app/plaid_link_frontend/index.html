@@ -51,8 +51,8 @@
 </head>
 <body>
   <div class="wrap">
-    <button id="open-link" type="button" disabled>Connect Robinhood</button>
-    <span id="status">Preparing Plaid Link...</span>
+    <button id="open-link" type="button" disabled>Add Brokerage</button>
+    <span id="status">Connecting to your brokerage...</span>
   </div>
 
   <script>
@@ -200,7 +200,7 @@
         linkToken: latestArgs.linkToken,
         sentAt: Date.now()
       });
-      status.textContent = "Robinhood login opened in a separate window.";
+      status.textContent = "Brokerage login opened in a separate window.";
     }
 
     function startTokenBroadcast(popupId) {
@@ -262,13 +262,13 @@
 
     function popupDocument() {
       const linkToken = JSON.stringify(latestArgs.linkToken || "");
-      const title = JSON.stringify("Connect Robinhood");
+      const title = JSON.stringify("Add Brokerage");
       return `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Connect Robinhood</title>
+  <title>Add Brokerage</title>
   <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"><\/script>
   <style>
     body {
@@ -313,7 +313,7 @@
 </head>
 <body>
   <main>
-    <h1>Connect Robinhood</h1>
+    <h1>Add Brokerage</h1>
     <p id="message">Opening Plaid Link...</p>
     <button id="retry" type="button" style="display:none;">Open Plaid Link</button>
   </main>
@@ -414,7 +414,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Preparing Robinhood Login</title>
+  <title>Connecting Brokerage</title>
   <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"><\/script>
   <style>
     body {
@@ -446,8 +446,8 @@
 </head>
 <body>
   <main>
-    <h1>Preparing Robinhood Login</h1>
-    <p id="message">Keep this window open while Market Analyzer prepares Plaid Link.</p>
+    <h1>Connecting Brokerage</h1>
+    <p id="message">Keep this window open while Market Analyzer connects to your brokerage.</p>
     <button id="retry" type="button" style="display:none;">Open Plaid Link</button>
   </main>
   <script>
@@ -516,7 +516,7 @@
     function openPlaid() {
       if (!linkToken) {
         announceReady();
-        showRetry("Waiting for Market Analyzer to finish preparing Plaid Link.");
+        showRetry("Waiting for Market Analyzer to connect...");
         return;
       }
 
@@ -605,7 +605,7 @@
       pollToken();
       setTimeout(function() {
         if (!linkToken) {
-          showRetry("Waiting for Market Analyzer to finish preparing Plaid Link.");
+          showRetry("Waiting for Market Analyzer to connect...");
         }
       }, 1500);
     });
@@ -623,7 +623,7 @@
 
     function openPreparePopup() {
       pendingPopupId = "plaid-popup-" + Date.now() + "-" + Math.random().toString(16).slice(2);
-      pendingPopup = window.open("", "market_analyzer_robinhood_login", popupFeatures());
+      pendingPopup = window.open("", "market_analyzer_brokerage_login", popupFeatures());
       if (!pendingPopup) {
         pendingPopupId = null;
         status.textContent = "The browser blocked the popup. Allow popups and try again.";
@@ -655,7 +655,7 @@
       }
 
       const popupId = latestArgs.popupId || pendingPopupId || ("plaid-popup-" + Date.now() + "-" + Math.random().toString(16).slice(2));
-      const popup = existingPopup || window.open("", "market_analyzer_robinhood_login", popupFeatures());
+      const popup = existingPopup || window.open("", "market_analyzer_brokerage_login", popupFeatures());
       if (!popup) {
         status.textContent = "The browser blocked the popup. Allow popups and try again.";
         setComponentValue({
@@ -715,7 +715,7 @@
         try {
           openPlaidLink();
         } catch (error) {
-          status.textContent = "Click Connect Robinhood to continue.";
+          status.textContent = "Click Add Brokerage to continue.";
           button.disabled = false;
           setComponentValue({
             event: "open_failed",
@@ -729,7 +729,7 @@
 
     function render(args) {
       latestArgs = args || {};
-      button.textContent = latestArgs.buttonLabel || "Connect Robinhood";
+      button.textContent = latestArgs.buttonLabel || "Add Brokerage";
       if (!latestArgs.linkToken) {
         button.disabled = !latestArgs.prepareMode;
         status.textContent = latestArgs.prepareMode

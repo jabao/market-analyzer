@@ -60,7 +60,6 @@ def init_database() -> None:
     """Initialize the database schema, creating tables if they don't exist."""
     with get_connection() as conn:
         cursor = conn.cursor()
-        # Transactions table stores individual purchases (stock_name removed entirely)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS transactions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -82,6 +81,25 @@ def init_database() -> None:
         _ensure_column(cursor, "transactions", "external_account_id", "TEXT")
         _ensure_column(cursor, "transactions", "external_security_id", "TEXT")
         _ensure_column(cursor, "transactions", "imported_at", "DATETIME")
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS linked_accounts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                institution_name TEXT NOT NULL,
+                institution_id TEXT,
+                item_id TEXT NOT NULL UNIQUE,
+                access_token TEXT NOT NULL,
+                logo TEXT,
+                cash_balance REAL NOT NULL DEFAULT 0,
+                total_assets REAL NOT NULL DEFAULT 0,
+                linked_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                last_refreshed_at DATETIME
+            )
+        """)
+        _ensure_column(cursor, "linked_accounts", "last_refreshed_at", "DATETIME")
+        _ensure_column(cursor, "linked_accounts", "cash_balance", "REAL NOT NULL DEFAULT 0")
+        _ensure_column(cursor, "linked_accounts", "total_assets", "REAL NOT NULL DEFAULT 0")
+        _ensure_column(cursor, "linked_accounts", "logo", "TEXT")
         conn.commit()
 
 
@@ -302,4 +320,73 @@ def clear_all() -> None:
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM transactions")
+        conn.commit()
+
+
+def add_linked_account(
+    institution_name: str,
+    institution_id: str | None,
+    item_id: str,
+    access_token: str,
+    logo: str | None = None,
+    cash_balance: float = 0.0,
+    total_assets: float = 0.0,
+) -> int:
+    """Store a newly linked brokerage account. Returns the new record ID."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO linked_accounts
+                (institution_name, institution_id, item_id, access_token,
+                 logo, cash_balance, total_assets, linked_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            (institution_name, institution_id, item_id, access_token,
+             logo, cash_balance, total_assets),
+        )
+        conn.commit()
+        return cursor.lastrowid
+
+
+def get_linked_accounts() -> list[dict]:
+    """Return all linked brokerage accounts."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM linked_accounts ORDER BY institution_name")
+        return [dict(row) for row in cursor.fetchall()]
+
+
+def update_linked_account_logo(item_id: str, logo: str) -> None:
+    """Set the logo for a linked account."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE linked_accounts SET logo = ? WHERE item_id = ?", (logo, item_id))
+        conn.commit()
+
+
+def remove_linked_account(item_id: str) -> bool:
+    """Remove a linked account and its imported transactions. Returns True if removed."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM transactions WHERE external_item_id = ?", (item_id,))
+        cursor.execute("DELETE FROM linked_accounts WHERE item_id = ?", (item_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def update_linked_account_refresh(
+    item_id: str,
+    cash_balance: float = 0.0,
+    total_assets: float = 0.0,
+) -> None:
+    """Update balances and last_refreshed_at timestamp for a linked account."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """UPDATE linked_accounts
+               SET cash_balance = ?, total_assets = ?, last_refreshed_at = CURRENT_TIMESTAMP
+               WHERE item_id = ?""",
+            (cash_balance, total_assets, item_id),
+        )
         conn.commit()

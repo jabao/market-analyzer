@@ -16,6 +16,7 @@ API key can be saved via Save button (stored in session_state).
 
 from __future__ import annotations
 
+import base64
 import math
 import os
 import time
@@ -33,24 +34,26 @@ from app.llm.prompts import PROMPT_PREVIEWS, AnalysisMode as PromptMode
 from app.llm.providers import ProviderType, get_default_model_for_provider
 from app.portfolio_db import init_database as init_portfolio_db
 from app.portfolio_service import (
-    add_portfolio_holding,
     calculate_portfolio_summary,
     clear_price_cache,
     delete_all_transactions_for_ticker,
     delete_portfolio_holding,
+    get_all_linked_accounts,
     get_ticker_positions,
     get_current_prices_batch,
     get_portfolio_holdings,
     import_plaid_portfolio,
-    update_holding_purchase_date,
+    link_brokerage_account,
+    mark_account_refreshed,
+    unlink_brokerage_account,
 )
 from app.plaid_integration import (
-    ROBINHOOD_BROKERAGE,
     PlaidConfigurationError,
     PlaidImportError,
     create_investments_link_token,
     create_plaid_client,
     exchange_public_token,
+    get_institution_logo,
     get_investment_holdings,
     plaid_holdings_to_transactions,
 )
@@ -267,12 +270,6 @@ def _resolve_plaid_config() -> dict:
         or _nested_secret_value("plaid", "env", "environment", "PLAID_ENV")
         or "sandbox"
     )
-    robinhood_institution_id = (
-        os.environ.get("PLAID_ROBINHOOD_INSTITUTION_ID")
-        or _secret_value("PLAID_ROBINHOOD_INSTITUTION_ID")
-        or _nested_secret_value("plaid", "robinhood_institution_id", "PLAID_ROBINHOOD_INSTITUTION_ID")
-        or st.session_state.get("plaid_robinhood_institution_id")
-    )
     ca_bundle = (
         os.environ.get("PLAID_CA_BUNDLE")
         or _secret_value("PLAID_CA_BUNDLE")
@@ -299,7 +296,6 @@ def _resolve_plaid_config() -> dict:
         "client_id": client_id,
         "secret": secret,
         "environment": environment.lower(),
-        "robinhood_institution_id": robinhood_institution_id,
         "ca_bundle": ca_bundle,
         "connect_timeout": connect_timeout,
         "read_timeout": read_timeout,
@@ -731,8 +727,8 @@ def _ensure_plaid_client_user_id() -> str:
     return st.session_state["plaid_client_user_id"]
 
 
-def _prepare_robinhood_link_token(config: dict, *, auto_open: bool = False) -> None:
-    client = create_plaid_client(
+def _make_plaid_client(config: dict):
+    return create_plaid_client(
         config["client_id"],
         config["secret"],
         config["environment"],
@@ -740,82 +736,198 @@ def _prepare_robinhood_link_token(config: dict, *, auto_open: bool = False) -> N
         connect_timeout=config.get("connect_timeout"),
         read_timeout=config.get("read_timeout"),
     )
-    institution_id = config.get("robinhood_institution_id")
 
+
+def _prepare_link_token(config: dict) -> None:
+    client = _make_plaid_client(config)
     link_token = create_investments_link_token(
         client,
         client_user_id=_ensure_plaid_client_user_id(),
         client_name="Market Analyzer",
-        institution_id=institution_id,
     )
-    st.session_state["plaid_robinhood_link_token"] = link_token
-    st.session_state["plaid_robinhood_auto_open"] = auto_open
-    st.session_state["plaid_robinhood_launch_id"] = str(uuid.uuid4())
-    st.session_state.pop("plaid_robinhood_link_error", None)
+    st.session_state["plaid_link_token"] = link_token
+    st.session_state["plaid_auto_open"] = False
+    st.session_state["plaid_launch_id"] = str(uuid.uuid4())
+    st.session_state.pop("plaid_link_error", None)
 
 
-def _clear_robinhood_link_state() -> None:
-    st.session_state.pop("plaid_robinhood_link_token", None)
-    st.session_state.pop("plaid_robinhood_auto_open", None)
-    st.session_state.pop("plaid_robinhood_launch_id", None)
-    st.session_state.pop("plaid_robinhood_popup_id", None)
-    st.session_state.pop("plaid_last_prepare_popup_id", None)
-    st.session_state.pop("plaid_last_processed_public_token", None)
-    st.session_state.pop("plaid_robinhood_link_error", None)
+def _clear_link_state() -> None:
+    for key in [
+        "plaid_link_token", "plaid_auto_open", "plaid_launch_id",
+        "plaid_popup_id", "plaid_last_prepare_popup_id",
+        "plaid_last_processed_public_token", "plaid_link_error",
+    ]:
+        st.session_state.pop(key, None)
 
 
-def _import_robinhood_public_token(public_token: str, metadata: dict, config: dict) -> bool:
+def _import_brokerage_public_token(public_token: str, metadata: dict, config: dict) -> bool:
+    """Exchange a public token, fetch holdings, persist the link, and import transactions."""
     institution = metadata.get("institution") or {}
-    institution_name = institution.get("name") or ROBINHOOD_BROKERAGE
-    if config["environment"] != "sandbox" and "robinhood" not in institution_name.casefold():
-        st.error(f"Selected institution was {institution_name}. Please connect Robinhood for this importer.")
-        return False
+    institution_name = institution.get("name") or "Unknown Brokerage"
+    institution_id = institution.get("institution_id")
 
-    client = create_plaid_client(
-        config["client_id"],
-        config["secret"],
-        config["environment"],
-        ca_bundle=config.get("ca_bundle"),
-        connect_timeout=config.get("connect_timeout"),
-        read_timeout=config.get("read_timeout"),
-    )
+    client = _make_plaid_client(config)
     exchange = exchange_public_token(client, public_token)
-    holdings_response = get_investment_holdings(client, exchange["access_token"])
+    access_token = exchange["access_token"]
+    item_id = exchange.get("item_id") or str(uuid.uuid4())
+
+    logo = get_institution_logo(client, institution_id)
+
+    holdings_response = get_investment_holdings(client, access_token)
     import_result = plaid_holdings_to_transactions(
         holdings_response,
-        item_id=exchange.get("item_id"),
-        brokerage_name=ROBINHOOD_BROKERAGE,
+        item_id=item_id,
+        brokerage_name=institution_name,
+    )
+
+    link_brokerage_account(
+        institution_name, institution_id, item_id, access_token,
+        logo=logo,
+        cash_balance=import_result.cash_balance,
+        total_assets=import_result.total_market_value,
     )
 
     if not import_result.transactions:
-        st.warning("Plaid returned no ticker-based Robinhood holdings to import.")
+        st.warning(f"Plaid returned no ticker-based holdings from {institution_name}.")
         if import_result.skipped_count:
             st.caption(f"Skipped {import_result.skipped_count} cash or unsupported holdings.")
-        return False
+        return True
 
-    imported_count = import_plaid_portfolio(import_result, brokerage=ROBINHOOD_BROKERAGE)
+    imported_count = import_plaid_portfolio(import_result, brokerage=institution_name)
+    mark_account_refreshed(
+        item_id,
+        cash_balance=import_result.cash_balance,
+        total_assets=import_result.total_market_value,
+    )
     clear_price_cache()
-    st.session_state["plaid_robinhood_last_import"] = {
+    st.session_state["plaid_last_import"] = {
+        "institution_name": institution_name,
         "imported_count": imported_count,
         "skipped_count": import_result.skipped_count,
         "total_market_value": import_result.total_market_value,
         "imported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
-    st.session_state.pop("plaid_robinhood_link_token", None)
-    st.session_state.pop("plaid_robinhood_popup_id", None)
     return True
 
 
-def render_brokerage_import_panel() -> None:
-    with st.expander("Import From Robinhood", expanded=bool(st.session_state.get("plaid_robinhood_link_token"))):
-        config = _resolve_plaid_config()
-        last_import = st.session_state.get("plaid_robinhood_last_import")
-        if last_import:
-            st.success(
-                f"Last import: {last_import['imported_count']} holdings at {last_import['imported_at']} "
-                f"(skipped {last_import['skipped_count']})."
-            )
+def _refresh_linked_account(account: dict, config: dict) -> dict:
+    """Re-fetch holdings for a single linked account using its stored access token."""
+    client = _make_plaid_client(config)
+    holdings_response = get_investment_holdings(client, account["access_token"])
+    import_result = plaid_holdings_to_transactions(
+        holdings_response,
+        item_id=account["item_id"],
+        brokerage_name=account["institution_name"],
+    )
+    imported_count = 0
+    if import_result.transactions:
+        imported_count = import_plaid_portfolio(import_result, brokerage=account["institution_name"])
+    mark_account_refreshed(
+        account["item_id"],
+        cash_balance=import_result.cash_balance,
+        total_assets=import_result.total_market_value,
+    )
+    return {"institution_name": account["institution_name"], "imported_count": imported_count}
 
+
+_BROKERAGE_REFRESH_INTERVAL = 300
+
+
+def _maybe_auto_refresh_brokerages(config: dict) -> None:
+    """Periodically refresh all linked brokerage data every 5 minutes."""
+    if config["missing"]:
+        return
+    now = time.time()
+    last_refresh = st.session_state.get("plaid_auto_refresh_at", 0)
+    if now - last_refresh < _BROKERAGE_REFRESH_INTERVAL:
+        return
+
+    linked = get_all_linked_accounts()
+    if not linked:
+        return
+
+    st.session_state["plaid_auto_refresh_at"] = now
+    refreshed = []
+    for account in linked:
+        try:
+            result = _refresh_linked_account(account, config)
+            refreshed.append(result)
+        except Exception:
+            pass
+
+    if refreshed:
+        clear_price_cache()
+
+
+def _backfill_logos(config: dict) -> None:
+    """Fetch logos for linked accounts that have an institution_id but no logo."""
+    if config["missing"]:
+        return
+    linked = get_all_linked_accounts()
+    needs_logo = [a for a in linked if a.get("institution_id") and not a.get("logo")]
+    if not needs_logo:
+        return
+    from app.portfolio_db import update_linked_account_logo
+    client = _make_plaid_client(config)
+    for account in needs_logo:
+        logo = get_institution_logo(client, account["institution_id"])
+        if logo:
+            update_linked_account_logo(account["item_id"], logo)
+
+
+def render_brokerage_import_panel() -> None:
+    config = _resolve_plaid_config()
+
+    _maybe_auto_refresh_brokerages(config)
+    _backfill_logos(config)
+
+    linked_accounts = get_all_linked_accounts()
+    if linked_accounts:
+        st.subheader("Connected Brokerages")
+        for account in linked_accounts:
+            total_assets = account.get("total_assets") or 0.0
+            cash = account.get("cash_balance") or 0.0
+            logo = account.get("logo")
+            col_logo, col_assets, col_cash, col_time, col_remove = st.columns([2, 2, 2, 2, 1])
+            with col_logo:
+                if logo:
+                    try:
+                        from PIL import Image
+                        import io
+                        img = Image.open(io.BytesIO(base64.b64decode(logo)))
+                        img = img.convert("RGBA")
+                        target = 256
+                        if img.width < target:
+                            img = img.resize((target, target), Image.LANCZOS)
+                        buf = io.BytesIO()
+                        img.save(buf, format="PNG")
+                        st.image(buf.getvalue(), width=48)
+                    except Exception:
+                        pass
+                st.markdown(f"**{account['institution_name']}**")
+            with col_assets:
+                st.metric("Total Assets", format_large(total_assets, currency=True))
+            with col_cash:
+                st.metric("Cash Available", format_large(cash, currency=True))
+            with col_time:
+                refreshed_at = account.get("last_refreshed_at") or account.get("linked_at") or ""
+                st.caption(f"Last synced: {refreshed_at}")
+            with col_remove:
+                if st.button("Disconnect", key=f"disconnect_{account['item_id']}", type="secondary"):
+                    unlink_brokerage_account(account["item_id"])
+                    clear_price_cache()
+                    st.rerun()
+
+        st.divider()
+
+    last_import = st.session_state.get("plaid_last_import")
+    if last_import:
+        st.success(
+            f"Linked {last_import['institution_name']}: {last_import['imported_count']} holdings imported "
+            f"(skipped {last_import['skipped_count']})."
+        )
+
+    with st.expander("Add Brokerage", expanded=bool(st.session_state.get("plaid_link_token"))):
         if config["missing"]:
             st.warning(
                 "Plaid credentials are not configured. Set "
@@ -823,22 +935,20 @@ def render_brokerage_import_panel() -> None:
             )
             return
 
-        st.caption(f"Plaid environment: {config['environment']} · Product: investments")
-        if not config.get("robinhood_institution_id"):
-            st.caption("Optional: set PLAID_ROBINHOOD_INSTITUTION_ID to skip Plaid institution selection.")
+        st.caption("Search for and connect any brokerage supported by Plaid.")
 
-        link_token = st.session_state.get("plaid_robinhood_link_token")
-        link_error = st.session_state.get("plaid_robinhood_link_error")
+        link_token = st.session_state.get("plaid_link_token")
+        link_error = st.session_state.get("plaid_link_error")
         if link_error:
             st.error(link_error)
 
         if not link_token:
             link_result = plaid_link_button(
                 None,
-                label="Start Robinhood Login",
+                label="Add Brokerage",
                 prepare_mode=True,
                 popup_mode=True,
-                key="plaid_robinhood_link",
+                key="plaid_brokerage_link",
             )
             if not link_result:
                 return
@@ -854,15 +964,15 @@ def render_brokerage_import_panel() -> None:
 
                 st.session_state["plaid_last_prepare_popup_id"] = popup_id
                 try:
-                    with st.spinner("Preparing Robinhood login..."):
-                        _prepare_robinhood_link_token(config, auto_open=False)
-                    st.session_state["plaid_robinhood_popup_id"] = popup_id
+                    with st.spinner("Connecting to Plaid..."):
+                        _prepare_link_token(config)
+                    st.session_state["plaid_popup_id"] = popup_id
                     st.rerun()
                 except (PlaidConfigurationError, PlaidImportError) as exc:
-                    st.session_state["plaid_robinhood_link_error"] = str(exc)
+                    st.session_state["plaid_link_error"] = str(exc)
                     st.rerun()
                 except Exception as exc:
-                    st.session_state["plaid_robinhood_link_error"] = f"Failed to create Plaid Link token: {exc}"
+                    st.session_state["plaid_link_error"] = f"Failed to create Plaid Link token: {exc}"
                     st.rerun()
             return
 
@@ -872,27 +982,27 @@ def render_brokerage_import_panel() -> None:
         st.caption("A separate login window should be open. If it did not load Plaid Link, click the button below.")
         link_result = plaid_link_button(
             link_token,
-            label="Open Robinhood Login",
-            auto_open=bool(st.session_state.get("plaid_robinhood_auto_open")),
-            launch_id=st.session_state.get("plaid_robinhood_launch_id"),
-            popup_id=st.session_state.get("plaid_robinhood_popup_id"),
-            key="plaid_robinhood_link",
+            label="Open Brokerage Login",
+            auto_open=bool(st.session_state.get("plaid_auto_open")),
+            launch_id=st.session_state.get("plaid_launch_id"),
+            popup_id=st.session_state.get("plaid_popup_id"),
+            key="plaid_brokerage_link",
         )
 
-        if st.button("Refresh Login Token", use_container_width=True, key="plaid_reset_robinhood"):
-            _clear_robinhood_link_state()
+        if st.button("Reset", use_container_width=True, key="plaid_reset_link"):
+            _clear_link_state()
             st.rerun()
 
         if not link_result:
             return
 
         if link_result.get("event") == "open_failed":
-            st.session_state["plaid_robinhood_auto_open"] = False
-            st.warning("The browser blocked the automatic Plaid popup. Click Connect Robinhood to continue.")
+            st.session_state["plaid_auto_open"] = False
+            st.warning("The browser blocked the automatic Plaid popup. Click Add Brokerage to continue.")
             return
 
         if link_result.get("event") == "exit":
-            st.session_state["plaid_robinhood_auto_open"] = False
+            st.session_state["plaid_auto_open"] = False
             error = link_result.get("error")
             if error:
                 st.error(f"Plaid Link exited with an error: {error}")
@@ -902,17 +1012,18 @@ def render_brokerage_import_panel() -> None:
         if not public_token or public_token == st.session_state.get("plaid_last_processed_public_token"):
             return
 
-        st.session_state["plaid_robinhood_auto_open"] = False
+        st.session_state["plaid_auto_open"] = False
         st.session_state["plaid_last_processed_public_token"] = public_token
         try:
-            with st.spinner("Importing Robinhood holdings from Plaid..."):
-                imported = _import_robinhood_public_token(public_token, link_result.get("metadata") or {}, config)
+            with st.spinner("Importing brokerage holdings..."):
+                imported = _import_brokerage_public_token(public_token, link_result.get("metadata") or {}, config)
             if imported:
+                _clear_link_state()
                 st.rerun()
         except (PlaidConfigurationError, PlaidImportError) as exc:
             st.error(str(exc))
         except Exception as exc:
-            st.error(f"Failed to import Robinhood holdings: {exc}")
+            st.error(f"Failed to import holdings: {exc}")
 
 
 def render_portfolio_page():
@@ -937,17 +1048,16 @@ def render_portfolio_page():
     init_portfolio_db()
     render_brokerage_import_panel()
 
-    # Layout columns for metrics
-    cols = st.columns(4)
+    cols = st.columns(5)
 
-    # Get all holdings
     holdings = get_portfolio_holdings()
     tickers = [h["ticker"] for h in holdings]
 
-    # Fetch live prices
     prices = get_current_prices_batch(tickers) if tickers else {}
 
-    # Calculate summary
+    linked_accounts_all = get_all_linked_accounts()
+    total_cash = sum(a.get("cash_balance") or 0.0 for a in linked_accounts_all)
+
     if holdings:
         summary = calculate_portfolio_summary(holdings, prices)
         rows = summary["rows"]
@@ -962,24 +1072,32 @@ def render_portfolio_page():
         total_gain_loss = 0.0
         total_gain_pct = 0.0
 
-    # Display summary metrics at top
-    cols[0].metric("Total Holdings", len(holdings))
-    cols[1].metric("Total Cost Basis", format_large(total_cost, currency=True))
-    cols[2].metric("Current Value", format_large(total_value, currency=True))
+    total_assets = total_value + total_cash
 
-    # Format gain/loss with color
+    cols[0].metric("Total Holdings", len(holdings))
+    cols[1].metric("Total Assets", format_large(total_assets, currency=True))
+    cols[2].metric("Cash", format_large(total_cash, currency=True))
+    cols[3].metric("Invested Value", format_large(total_value, currency=True))
+
     if total_gain_loss >= 0:
         gl_display = f"+{format_large(total_gain_loss, currency=True)} (+{total_gain_pct:.2f}%)"
     else:
         gl_display = f"{format_large(total_gain_loss, currency=True)} ({total_gain_pct:.2f}%)"
-    cols[3].metric("Net Gain/Loss", gl_display)
+    cols[4].metric("Net Gain/Loss", gl_display)
 
     st.divider()
 
-    # Show holdings table (if there are any)
     col_refresh, _ = st.columns([1, 3])
     with col_refresh:
-        if st.button("🔄 Refresh Prices", use_container_width=True, key="portfolio_refresh"):
+        if st.button("🔄 Refresh", use_container_width=True, key="portfolio_refresh"):
+            config = _resolve_plaid_config()
+            if not config["missing"]:
+                linked = get_all_linked_accounts()
+                for account in linked:
+                    try:
+                        _refresh_linked_account(account, config)
+                    except Exception:
+                        pass
             clear_price_cache()
             st.rerun()
 
@@ -988,17 +1106,13 @@ def render_portfolio_page():
     if holdings:
         st.subheader("Your Holdings")
         
-        # Build DataFrame for display
         df = pd.DataFrame(rows)
-        original_purchase_dates = df.set_index("ticker_key")["Purchase Dates"].to_dict()
 
-        # Configure grid options for portfolio
         builder = GridOptionsBuilder.from_dataframe(df)
         builder.configure_default_column(sortable=True, filterable=True, resizable=True)
         builder.configure_selection(selection_mode="single", use_checkbox=False)
         builder.configure_pagination(enabled=False)
 
-        # Format numeric columns
         numeric_cols = ["Shares", "Avg Purchase Price", "Current Price", "Cost Basis", "Current Value", "Gain/Loss", "Gain/Loss %"]
         for col in numeric_cols:
             if col == "Gain/Loss %":
@@ -1013,17 +1127,7 @@ def render_portfolio_page():
                 expr = "params.value === null || isNaN(params.value) ? '-' : '$' + params.value.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})"
             builder.configure_column(col, type=["numericColumn"], valueFormatter=_formatter(expr))
 
-        # Edits apply to blank imported rows for the ticker, or a single-row ticker.
-        builder.configure_column(
-            "Purchase Dates",
-            width=250,
-            editable=True,
-            cellEditor="agTextCellEditor",
-            headerTooltip="Editable. Use YYYY-MM-DD or M/D/YY.",
-        )
-
         options = builder.build()
-        options["stopEditingWhenCellsLoseFocus"] = True
 
         # Render the portfolio table
         grid_response = AgGrid(
@@ -1033,34 +1137,9 @@ def render_portfolio_page():
             theme="streamlit",
             fit_columns_on_grid_load=True,
             allow_unsafe_jscode=True,
-            update_mode=GridUpdateMode.SELECTION_CHANGED | GridUpdateMode.VALUE_CHANGED,
+            update_mode=GridUpdateMode.SELECTION_CHANGED,
             key="portfolio_grid",
         )
-
-        edited_data = grid_response.get("data")
-        if edited_data is not None:
-            edited_df = edited_data if isinstance(edited_data, pd.DataFrame) else pd.DataFrame(edited_data)
-            for _, edited_row in edited_df.iterrows():
-                ticker = edited_row.get("ticker_key")
-                if not ticker:
-                    continue
-                old_value = str(original_purchase_dates.get(ticker) or "").strip()
-                new_value = str(edited_row.get("Purchase Dates") or "").strip()
-                if new_value == old_value:
-                    continue
-
-                try:
-                    changed = update_holding_purchase_date(ticker, new_value)
-                except ValueError as exc:
-                    st.error(f"Invalid purchase date for {ticker}: {exc}")
-                    break
-
-                if changed:
-                    st.success(f"Updated purchase date for {ticker}.")
-                    st.rerun()
-                else:
-                    st.warning(f"No editable imported purchase date found for {ticker}.")
-                break
 
         # Delete/view buttons for selected row
         selected = grid_response.get("selected_rows")
@@ -1126,90 +1205,7 @@ def render_portfolio_page():
             st.divider()
 
     elif not viewing:
-        # No holdings - show empty state message
-        st.info("👆 No holdings yet. Use 'Add New Holding' below to get started!")
-        st.divider()
-
-    # Add new holding form appears at the end regardless of holdings status
-    render_add_holding_form()
-
-
-def render_add_holding_form():
-    """Render the add holding form as a helper function."""
-    with st.expander("➕ Add New Holding", expanded=True):
-        col1, col2 = st.columns(2)
-
-        with col1:
-            add_ticker_raw = st.text_input(
-                "Ticker Symbol",
-                placeholder="e.g., AAPL, MSFT (required)",
-                key="add_ticker",
-                help="Stock ticker symbol (required, will be converted to uppercase)",
-            )
-            add_ticker = add_ticker_raw.strip().upper() if add_ticker_raw else ""
-
-            add_brokerage = st.text_input(
-                "Brokerage",
-                placeholder="e.g., Fidelity, Robinhood, E*TRADE",
-                key="add_brokerage",
-                help="Which brokerage holds this position (optional)",
-            ).strip()
-
-        with col2:
-            add_shares = st.number_input(
-                "Number of Shares",
-                min_value=0.01,
-                value=1.0,
-                step=0.01,
-                key="add_shares",
-                help="Number of shares owned",
-            )
-
-            add_purchase_price = st.number_input(
-                "Purchase Price ($)",
-                min_value=0.01,
-                value=100.0,
-                step=0.01,
-                key="add_price",
-                help="Average purchase price per share",
-            )
-
-            add_purchase_date = st.date_input(
-                "Purchase Date",
-                value=datetime.now(),
-                key="add_date",
-                help="Date when you purchased these shares",
-            )
-
-        col_save, _ = st.columns([2, 1])
-        with col_save:
-            if st.button("💾 Add Holding", type="primary", use_container_width=True, key="btn_add_holding"):
-                if not add_ticker:
-                    st.error("Please enter a ticker symbol.")
-                elif add_shares <= 0:
-                    st.error("Please enter a valid number of shares.")
-                elif add_purchase_price <= 0:
-                    st.error("Please enter a valid purchase price.")
-                else:
-                    try:
-                        holding_id = add_portfolio_holding(
-                            ticker=add_ticker,
-                            shares=float(add_shares),
-                            purchase_date=add_purchase_date,
-                            purchase_price=float(add_purchase_price),
-                            brokerage=add_brokerage if add_brokerage else None,
-                        )
-                        st.success(f"Holding added successfully! (ID: {holding_id})")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Failed to add holding: {e}")
-
-    st.divider()
-    st.caption(
-        "💡 Tip: Prices are fetched from Yahoo Finance and cached for 30 seconds. "
-        "Same tickers are automatically combined with weighted average price. "
-        "Click Refresh to force an immediate update. Click a row's ticker to view/delete individual transactions."
-    )
+        st.info("No holdings yet. Connect a brokerage above to import your portfolio.")
 
 
 def main() -> None:

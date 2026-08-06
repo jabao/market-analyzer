@@ -8,16 +8,20 @@ import time
 import yfinance as yf
 
 from app.portfolio_db import (
+    add_linked_account,
     add_transaction,
     get_aggregated_holdings,
     get_all_transactions,
+    get_linked_accounts,
     get_ticker_transactions,
     init_database,
     delete_transaction,
+    remove_linked_account,
     replace_imported_transactions,
+    update_linked_account_refresh,
     update_purchase_date_for_ticker,
 )
-from app.plaid_integration import PLAID_SOURCE, ROBINHOOD_BROKERAGE, PlaidPortfolioImport
+from app.plaid_integration import PLAID_SOURCE, PlaidPortfolioImport
 
 _PRICE_CACHE: dict[str, tuple[float, float | None]] = {}
 _PRICE_TTL_SECONDS = 30
@@ -42,13 +46,48 @@ def add_portfolio_holding(
     return add_transaction(ticker, shares, purchase_date, purchase_price, brokerage)
 
 
-def import_plaid_portfolio(import_result: PlaidPortfolioImport, brokerage: str = ROBINHOOD_BROKERAGE) -> int:
+def import_plaid_portfolio(import_result: PlaidPortfolioImport, brokerage: str) -> int:
     """Replace existing Plaid-imported brokerage rows with freshly imported holdings."""
     return replace_imported_transactions(
         import_result.transactions,
         source=PLAID_SOURCE,
         brokerage=brokerage,
     )
+
+
+def link_brokerage_account(
+    institution_name: str,
+    institution_id: str | None,
+    item_id: str,
+    access_token: str,
+    logo: str | None = None,
+    cash_balance: float = 0.0,
+    total_assets: float = 0.0,
+) -> int:
+    """Persist a newly linked brokerage account."""
+    return add_linked_account(
+        institution_name, institution_id, item_id, access_token,
+        logo=logo, cash_balance=cash_balance, total_assets=total_assets,
+    )
+
+
+def get_all_linked_accounts() -> list[dict]:
+    """Return all linked brokerage accounts."""
+    return get_linked_accounts()
+
+
+def unlink_brokerage_account(item_id: str) -> bool:
+    """Remove a linked account and all its imported holdings."""
+    return remove_linked_account(item_id)
+
+
+def mark_account_refreshed(
+    item_id: str,
+    cash_balance: float = 0.0,
+    total_assets: float = 0.0,
+) -> None:
+    """Update balances and last refresh timestamp for a linked account."""
+    update_linked_account_refresh(item_id, cash_balance=cash_balance, total_assets=total_assets)
 
 
 def update_holding_purchase_date(ticker: str, purchase_date_text: str) -> int:
@@ -143,8 +182,8 @@ def calculate_portfolio_summary(holdings: list[dict], prices: dict[str, float | 
         gain_loss = current_value - cost_basis if current_value else None
         gain_loss_pct = ((current_price - avg_purchase_price) / avg_purchase_price * 100) if current_price and avg_purchase_price else None
 
-        total_cost_basis += cost_basis
         if current_value is not None:
+            total_cost_basis += cost_basis
             total_current_value += current_value
 
         # Assign a synthetic id for row selection (use hash of ticker)
@@ -152,11 +191,10 @@ def calculate_portfolio_summary(holdings: list[dict], prices: dict[str, float | 
         
         rows.append({
             "id": synthetic_id,
-            "ticker_key": ticker,  # For lookup operations
+            "ticker_key": ticker,
             "Ticker": ticker,
             "Stock Name": holding["stock_name"],
             "Shares": total_shares,
-            "Purchase Dates": holding["purchase_dates_str"] or "",
             "Avg Purchase Price": avg_purchase_price,
             "Current Price": current_price,
             "Cost Basis": cost_basis,

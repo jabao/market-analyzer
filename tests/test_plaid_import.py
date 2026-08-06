@@ -2,7 +2,7 @@ from datetime import date, datetime
 
 from app import plaid_integration
 from app import portfolio_db
-from app.plaid_integration import ROBINHOOD_BROKERAGE, plaid_holdings_to_transactions
+from app.plaid_integration import plaid_holdings_to_transactions
 
 
 def test_plaid_ssl_ca_cert_prefers_explicit_or_env_bundle(monkeypatch):
@@ -84,6 +84,7 @@ def test_plaid_holdings_to_transactions_maps_cost_basis_and_skips_cash():
     result = plaid_holdings_to_transactions(
         response,
         item_id="item-1",
+        brokerage_name="Robinhood",
         import_date=date(2026, 7, 29),
         imported_at=datetime(2026, 7, 29, 12, 30),
     )
@@ -94,7 +95,7 @@ def test_plaid_holdings_to_transactions_maps_cost_basis_and_skips_cash():
     assert row["shares"] == 1.5
     assert row["purchase_date"] == date(2026, 7, 29)
     assert row["purchase_price"] == 100.0
-    assert row["brokerage"] == ROBINHOOD_BROKERAGE
+    assert row["brokerage"] == "Robinhood"
     assert row["external_item_id"] == "item-1"
     assert row["external_account_id"] == "acc-1"
     assert row["external_security_id"] == "sec-aapl"
@@ -120,7 +121,7 @@ def test_plaid_holdings_to_transactions_uses_current_price_when_cost_basis_missi
         ],
     }
 
-    result = plaid_holdings_to_transactions(response, item_id="item-1")
+    result = plaid_holdings_to_transactions(response, item_id="item-1", brokerage_name="Robinhood")
 
     assert len(result.transactions) == 1
     assert result.transactions[0]["ticker"] == "VTI"
@@ -144,7 +145,7 @@ def test_plaid_holdings_without_brokerage_purchase_date_imports_blank_date():
         ],
     }
 
-    result = plaid_holdings_to_transactions(response, item_id="item-1")
+    result = plaid_holdings_to_transactions(response, item_id="item-1", brokerage_name="Robinhood")
 
     assert result.transactions[0]["purchase_date"] is None
 
@@ -165,7 +166,7 @@ def test_plaid_holdings_keep_brokerage_purchase_date_when_present():
         ],
     }
 
-    result = plaid_holdings_to_transactions(response, item_id="item-1")
+    result = plaid_holdings_to_transactions(response, item_id="item-1", brokerage_name="Robinhood")
 
     assert result.transactions[0]["purchase_date"] == "2026-07-29"
 
@@ -195,7 +196,7 @@ def test_replace_imported_transactions_leaves_manual_holdings(monkeypatch, tmp_p
             },
         ],
         source="plaid",
-        brokerage=ROBINHOOD_BROKERAGE,
+        brokerage="Robinhood",
     )
 
     inserted = portfolio_db.replace_imported_transactions(
@@ -212,7 +213,7 @@ def test_replace_imported_transactions_leaves_manual_holdings(monkeypatch, tmp_p
             },
         ],
         source="plaid",
-        brokerage=ROBINHOOD_BROKERAGE,
+        brokerage="Robinhood",
     )
 
     rows = portfolio_db.get_all_transactions()
@@ -225,7 +226,7 @@ def test_replace_imported_transactions_leaves_manual_holdings(monkeypatch, tmp_p
     assert manual["source"] == "manual"
     assert manual["brokerage"] == "Manual"
     assert imported["source"] == "plaid"
-    assert imported["brokerage"] == ROBINHOOD_BROKERAGE
+    assert imported["brokerage"] == "Robinhood"
     assert imported["external_item_id"] == "item-new"
 
     aggregated = portfolio_db.get_aggregated_holdings()
@@ -251,7 +252,7 @@ def test_imported_blank_purchase_date_is_hidden_and_editable(monkeypatch, tmp_pa
             },
         ],
         source="plaid",
-        brokerage=ROBINHOOD_BROKERAGE,
+        brokerage="Robinhood",
     )
 
     rows = portfolio_db.get_all_transactions()

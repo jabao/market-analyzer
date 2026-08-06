@@ -10,7 +10,6 @@ from typing import Any, Mapping
 
 
 PLAID_SOURCE = "plaid"
-ROBINHOOD_BROKERAGE = "Robinhood"
 PLAID_ENVIRONMENTS = {"sandbox", "development", "production"}
 PLAID_CONNECT_TIMEOUT_SECONDS = 10
 PLAID_READ_TIMEOUT_SECONDS = 30
@@ -30,6 +29,7 @@ class PlaidPortfolioImport:
     skipped: list[dict]
     total_market_value: float
     institution_name: str
+    cash_balance: float = 0.0
     item_id: str | None = None
 
     @property
@@ -44,6 +44,8 @@ def _require_plaid() -> dict[str, Any]:
         from plaid.api_client import ApiClient
         from plaid.configuration import Configuration
         from plaid.model.country_code import CountryCode
+        from plaid.model.institutions_get_by_id_request import InstitutionsGetByIdRequest
+        from plaid.model.institutions_get_by_id_request_options import InstitutionsGetByIdRequestOptions
         from plaid.model.institutions_search_request import InstitutionsSearchRequest
         from plaid.model.investments_holdings_get_request import InvestmentsHoldingsGetRequest
         from plaid.model.item_public_token_exchange_request import ItemPublicTokenExchangeRequest
@@ -61,6 +63,8 @@ def _require_plaid() -> dict[str, Any]:
         "ApiClient": ApiClient,
         "Configuration": Configuration,
         "CountryCode": CountryCode,
+        "InstitutionsGetByIdRequest": InstitutionsGetByIdRequest,
+        "InstitutionsGetByIdRequestOptions": InstitutionsGetByIdRequestOptions,
         "InstitutionsSearchRequest": InstitutionsSearchRequest,
         "InvestmentsHoldingsGetRequest": InvestmentsHoldingsGetRequest,
         "ItemPublicTokenExchangeRequest": ItemPublicTokenExchangeRequest,
@@ -158,7 +162,30 @@ def create_plaid_client(
     return client
 
 
-def find_institution_id(client, query: str = ROBINHOOD_BROKERAGE) -> str | None:
+def get_institution_logo(client, institution_id: str) -> str | None:
+    """Fetch the base64-encoded logo for a Plaid institution. Returns None on failure."""
+    if not institution_id:
+        return None
+    plaid = _require_plaid()
+    try:
+        options = plaid["InstitutionsGetByIdRequestOptions"](
+            include_optional_metadata=True,
+        )
+        request = plaid["InstitutionsGetByIdRequest"](
+            institution_id=institution_id,
+            country_codes=[plaid["CountryCode"]("US")],
+            options=options,
+        )
+        response = _as_dict(
+            client.institutions_get_by_id(request, _request_timeout=_client_request_timeout(client))
+        )
+        institution = response.get("institution") or {}
+        return institution.get("logo")
+    except Exception:
+        return None
+
+
+def find_institution_id(client, query: str = "Robinhood") -> str | None:
     """Find a Plaid institution id for a brokerage name, preferring exact matches."""
     plaid = _require_plaid()
     request = plaid["InstitutionsSearchRequest"](
@@ -255,7 +282,7 @@ def plaid_holdings_to_transactions(
     holdings_response: Mapping[str, Any],
     *,
     item_id: str | None,
-    brokerage_name: str = ROBINHOOD_BROKERAGE,
+    brokerage_name: str,
     import_date: date | None = None,
     imported_at: datetime | None = None,
 ) -> PlaidPortfolioImport:
@@ -283,6 +310,7 @@ def plaid_holdings_to_transactions(
     transactions: list[dict] = []
     skipped: list[dict] = []
     total_market_value = 0.0
+    cash_balance = 0.0
 
     for holding in holdings_response.get("holdings", []):
         account_id = holding.get("account_id")
@@ -295,6 +323,8 @@ def plaid_holdings_to_transactions(
             total_market_value += market_value
 
         if _is_cash_like(security):
+            if market_value is not None:
+                cash_balance += market_value
             skipped.append({"security_id": security_id, "reason": "cash"})
             continue
 
@@ -337,6 +367,7 @@ def plaid_holdings_to_transactions(
         transactions=transactions,
         skipped=skipped,
         total_market_value=total_market_value,
+        cash_balance=cash_balance,
         institution_name=brokerage_name,
         item_id=item_id,
     )

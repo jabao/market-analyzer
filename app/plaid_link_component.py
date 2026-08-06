@@ -14,7 +14,7 @@ _plaid_link = components.declare_component("plaid_link", path=str(_COMPONENT_DIR
 def plaid_link_button(
     link_token: str | None,
     *,
-    label: str = "Connect Robinhood",
+    label: str = "Add Brokerage",
     auto_open: bool = False,
     popup_mode: bool = True,
     prepare_mode: bool = False,
