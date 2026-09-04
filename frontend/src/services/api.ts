@@ -18,6 +18,9 @@ export const marketApi = {
     financial_health: number
   }) => api.post('/market/scored', { weights }).then(r => r.data),
   
+  searchSymbols: (query: string, limit: number = 8) =>
+    api.get('/market/search', { params: { q: query, limit } }).then(r => r.data),
+
   getStockDetails: (symbol: string) => 
     api.get(`/market/stock/${symbol}`).then(r => r.data),
   

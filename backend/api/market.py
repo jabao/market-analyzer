@@ -1,6 +1,7 @@
 """Market data API endpoints.
 
-Provides S&P 500 quotes, composite scoring, stock details, and price history.
+Provides S&P 500 quotes, composite scoring, universal stock search, stock
+details, and price history.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from backend.models.market import (
     RefreshResponse,
     ScoredStocksRequest,
     StockDetailsResponse,
+    StockSearchResult,
     WeightsRequest,
 )
 
@@ -56,6 +58,29 @@ async def get_scored_stocks(request: ScoredStocksRequest) -> list[dict[str, Any]
         return scored_df.to_dict(orient="records")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to score stocks: {str(e)}")
+
+
+@router.get("/search", response_model=list[StockSearchResult])
+async def search_stocks(
+    q: str = Query(default="", min_length=1, max_length=50),
+    limit: int = Query(default=8, ge=1, le=20),
+) -> list[StockSearchResult]:
+    """Search all stocks by ticker or company name via Yahoo Finance."""
+    try:
+        results = data_source.search_symbols(q, max_results=limit)
+        return [
+            StockSearchResult(
+                symbol=r["symbol"],
+                name=r["name"],
+                exchange=r.get("exchange"),
+                sector=r.get("sector"),
+                industry=r.get("industry"),
+                quote_type=r.get("quote_type"),
+            )
+            for r in results
+        ]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to search stocks: {str(e)}")
 
 
 @router.get("/stock/{symbol}", response_model=StockDetailsResponse)
@@ -107,6 +132,7 @@ async def refresh_market_data() -> RefreshResponse:
         data_source._quote_cache.clear()
         data_source._info_cache.clear()
         data_source._history_cache.clear()
+        data_source._search_cache.clear()
         return RefreshResponse(status="ok", message="Market data cache cleared")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to refresh: {str(e)}")

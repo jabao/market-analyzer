@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect, type KeyboardEvent } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { marketApi } from '../services/api'
 import {
@@ -38,6 +38,20 @@ interface StockDetails {
   name: string
   summary?: string
   sections: [string, [string, any, string][]][]
+}
+
+interface RemoteStock {
+  symbol: string
+  name: string
+  exchange?: string | null
+  sector?: string | null
+  industry?: string | null
+}
+
+interface Suggestion {
+  ticker: string
+  company: string
+  detail?: string | null
 }
 
 const columnHelper = createColumnHelper<Stock>()
@@ -80,6 +94,9 @@ export default function MarketRankingPage() {
   const [sorting, setSorting] = useState<SortingState>([])
   const [selectedStock, setSelectedStock] = useState<string | null>(null)
   const [searchTicker, setSearchTicker] = useState('')
+  const [showSuggestions, setShowSuggestions] = useState(false)
+  const [activeIndex, setActiveIndex] = useState(0)
+  const [debouncedQuery, setDebouncedQuery] = useState('')
   const [priceRange, setPriceRange] = useState('6M')
   const [pageSize, setPageSize] = useState(20)
 
@@ -200,14 +217,74 @@ export default function MarketRankingPage() {
     setWeights(prev => ({ ...prev, [dimension]: value }))
   }
 
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedQuery(searchTicker), 250)
+    return () => clearTimeout(timer)
+  }, [searchTicker])
+
+  const { data: remoteResults = [], isFetching: isSearching } = useQuery({
+    queryKey: ['stockSearch', debouncedQuery],
+    queryFn: () => marketApi.searchSymbols(debouncedQuery.trim(), 8),
+    enabled: showSuggestions && debouncedQuery.trim().length >= 2,
+    staleTime: 5 * 60 * 1000,
+  })
+
+  const suggestions: Suggestion[] = useMemo(() => {
+    const seen = new Set<string>()
+    const merged: Suggestion[] = []
+    for (const item of remoteResults as RemoteStock[]) {
+      if (!item.symbol) continue
+      const ticker = item.symbol.toUpperCase()
+      if (seen.has(ticker)) continue
+      seen.add(ticker)
+      merged.push({
+        ticker,
+        company: item.name || item.symbol,
+        detail: item.exchange || item.sector || item.industry || null,
+      })
+    }
+    return merged.slice(0, 10)
+  }, [remoteResults])
+
+  const handleSelectSuggestion = (suggestion: Suggestion) => {
+    setSelectedStock(suggestion.ticker)
+    setSearchTicker(suggestion.ticker)
+    setShowSuggestions(false)
+    setActiveIndex(0)
+  }
+
   const handleRowClick = (stock: Stock) => {
     setSelectedStock(stock.Ticker)
     setSearchTicker('')
+    setShowSuggestions(false)
+    setActiveIndex(0)
   }
 
   const handleSearch = () => {
-    if (searchTicker.trim()) {
-      setSelectedStock(searchTicker.trim().toUpperCase())
+    const q = searchTicker.trim()
+    if (!q) return
+    if (suggestions.length > 0) {
+      const idx = Math.min(Math.max(activeIndex, 0), suggestions.length - 1)
+      handleSelectSuggestion(suggestions[idx])
+    } else {
+      setSelectedStock(q.toUpperCase())
+      setShowSuggestions(false)
+    }
+  }
+
+  const handleSearchKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'ArrowDown' && suggestions.length > 0) {
+      e.preventDefault()
+      setShowSuggestions(true)
+      setActiveIndex(prev => (prev + 1) % suggestions.length)
+    } else if (e.key === 'ArrowUp' && suggestions.length > 0) {
+      e.preventDefault()
+      setShowSuggestions(true)
+      setActiveIndex(prev => (prev - 1 + suggestions.length) % suggestions.length)
+    } else if (e.key === 'Enter') {
+      handleSearch()
+    } else if (e.key === 'Escape') {
+      setShowSuggestions(false)
     }
   }
 
@@ -380,14 +457,64 @@ export default function MarketRankingPage() {
         <h2 className="text-lg font-semibold text-slate-900 mb-4">Stock Details</h2>
         
         <div className="flex space-x-2 mb-6">
-          <input
-            type="text"
-            value={searchTicker}
-            onChange={(e) => setSearchTicker(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
-            placeholder="Search any ticker (e.g. NVDA, TSLA)"
-            className="flex-1 px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-          />
+          <div className="relative flex-1">
+            <input
+              type="text"
+              value={searchTicker}
+              onChange={(e) => { setSearchTicker(e.target.value); setShowSuggestions(true); setActiveIndex(0) }}
+              onFocus={() => { if (searchTicker.trim()) setShowSuggestions(true) }}
+              onBlur={() => setShowSuggestions(false)}
+              onKeyDown={handleSearchKeyDown}
+              placeholder="Search any stock by ticker or company name"
+              role="combobox"
+              aria-expanded={showSuggestions && suggestions.length > 0}
+              aria-controls="stock-search-listbox"
+              aria-autocomplete="list"
+              className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            />
+            {showSuggestions && searchTicker.trim() && (
+              <ul
+                id="stock-search-listbox"
+                role="listbox"
+                className="absolute z-10 mt-1 w-full bg-white border border-slate-200 rounded-lg shadow-lg max-h-72 overflow-y-auto"
+              >
+                {searchTicker.trim().length < 2 ? (
+                  <li className="px-4 py-3 text-sm text-slate-500">
+                    Keep typing to search all stocks…
+                  </li>
+                ) : (
+                <>
+                {suggestions.map((stock, idx) => (
+                  <li key={stock.ticker} role="option" aria-selected={idx === activeIndex}>
+                    <button
+                      type="button"
+                      onMouseDown={(e) => { e.preventDefault(); handleSelectSuggestion(stock) }}
+                      onMouseEnter={() => setActiveIndex(idx)}
+                      className={`w-full flex items-center justify-between px-4 py-2 text-left transition-colors ${idx === Math.min(activeIndex, suggestions.length - 1) ? 'bg-blue-50' : 'hover:bg-slate-50'}`}
+                    >
+                      <span className="flex items-center space-x-2 min-w-0">
+                        <span className="font-mono font-semibold text-slate-900">{stock.ticker}</span>
+                        <span className="text-sm text-slate-600 truncate">{stock.company}</span>
+                      </span>
+                      <span className="text-xs text-slate-400 ml-2 shrink-0">{stock.detail}</span>
+                    </button>
+                  </li>
+                ))}
+                {isSearching && (
+                  <li className="px-4 py-2 text-xs text-slate-400">
+                    Searching all stocks…
+                  </li>
+                )}
+                {!isSearching && suggestions.length === 0 && (
+                  <li className="px-4 py-3 text-sm text-slate-500">
+                    No matches. Press Enter to look up '{searchTicker.trim()}' as a ticker.
+                  </li>
+                )}
+                </>
+                )}
+              </ul>
+            )}
+          </div>
           <button
             onClick={handleSearch}
             className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors flex items-center"
@@ -498,7 +625,7 @@ export default function MarketRankingPage() {
           </div>
         ) : (
           <div className="text-center py-12 text-slate-500 bg-slate-50 rounded-lg">
-            Click any row above or search a ticker to see details
+            Click any row above or search any stock by ticker or company name to see details
           </div>
         )}
       </div>

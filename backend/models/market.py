@@ -31,6 +31,15 @@ class PriceHistoryPoint(BaseModel):
     price: float
 
 
+class StockSearchResult(BaseModel):
+    symbol: str
+    name: str
+    exchange: str | None = None
+    sector: str | None = None
+    industry: str | None = None
+    quote_type: str | None = None
+
+
 class RefreshResponse(BaseModel):
     status: str
     message: str

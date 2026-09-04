@@ -22,6 +22,7 @@ SP500_CACHE = CACHE_DIR / "sp500_symbols.json"
 SP500_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 
 _QUOTE_TTL_SECONDS = 15 * 60
+_SEARCH_TTL_SECONDS = 60 * 60
 _MAX_WORKERS = 16
 
 FALLBACK_SP500 = [
@@ -62,6 +63,7 @@ class Quote:
 _quote_cache: dict[str, tuple[float, Quote]] = {}
 _info_cache: dict[str, tuple[float, dict]] = {}
 _history_cache: dict[tuple[str, str, str], tuple[float, pd.DataFrame]] = {}
+_search_cache: dict[str, tuple[float, list[dict]]] = {}
 
 
 def get_sp500_symbols(force_refresh: bool = False) -> list[str]:
@@ -153,6 +155,86 @@ def get_price_history(symbol: str, period: str, interval: str, use_cache: bool =
         history = pd.DataFrame()
     _history_cache[key] = (time.time(), history)
     return history
+
+
+def search_symbols(
+    query: str,
+    max_results: int = 8,
+    use_cache: bool = True,
+    quote_types: tuple[str, ...] = ("EQUITY", "ETF"),
+) -> list[dict]:
+    """Search Yahoo Finance for tickers matching a company name or partial ticker.
+
+    Returns a list of `{"symbol", "name", "exchange", "sector", "industry",
+    "quote_type"}` dicts, limited to the given quote types. Returns an empty
+    list when the query is blank or the lookup fails."""
+    text = query.strip()
+    if not text:
+        return []
+    limit = max(1, min(max_results, 20))
+    key = f"{text.lower()}:{limit}:{','.join(quote_types)}"
+    now = time.time()
+    if use_cache:
+        entry = _search_cache.get(key)
+        if entry and now - entry[0] < _SEARCH_TTL_SECONDS:
+            return entry[1]
+    try:
+        candidates = _search_yahoo_symbols(text, limit, quote_types)
+        results = _rank_search_candidates(text, candidates)[:limit]
+    except Exception:
+        results = []
+    _search_cache[key] = (time.time(), results)
+    return results
+
+
+def _rank_search_candidates(query: str, results: list[dict]) -> list[dict]:
+    """Order Yahoo candidates so ticker matches outrank name matches.
+
+    Buckets are exact symbol, symbol prefix, company-name word prefix, symbol
+    substring, name substring, then Yahoo's own relevance order."""
+    q = query.strip().lower()
+    if not q:
+        return results
+
+    def bucket(item: dict) -> int:
+        symbol = str(item.get("symbol") or "").lower()
+        name = str(item.get("name") or "").lower()
+        if q == symbol:
+            return 0
+        if symbol.startswith(q):
+            return 1
+        if any(word.startswith(q) for word in name.split()):
+            return 2
+        if q in symbol:
+            return 3
+        if q in name:
+            return 4
+        return 5
+
+    return sorted(results, key=bucket)
+
+
+def _search_yahoo_symbols(query: str, limit: int, quote_types: tuple[str, ...]) -> list[dict]:
+    """Query Yahoo Finance search and return normalized candidates of the given types."""
+    from yfinance.search import Search
+
+    response = Search(query, max_results=min(limit * 2, 20), news_count=0, lists_count=0)
+    out: list[dict] = []
+    for item in response.quotes or []:
+        symbol = str(item.get("symbol") or "").strip()
+        if not symbol or item.get("quoteType") not in quote_types:
+            continue
+        out.append(
+            {
+                "symbol": symbol,
+                "name": item.get("longname") or item.get("shortname") or symbol,
+                "exchange": item.get("exchDisp") or item.get("exchange"),
+                "sector": item.get("sector"),
+                "industry": item.get("industry"),
+                "quote_type": item.get("quoteType"),
+            }
+        )
+    return out
 
 
 def _fetch_one(symbol: str) -> Quote:
