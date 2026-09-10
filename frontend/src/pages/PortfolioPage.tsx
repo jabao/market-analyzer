@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { portfolioApi, plaidApi } from '../services/api'
-import { Briefcase, RefreshCw, Trash2, Eye, TrendingUp, TrendingDown, DollarSign, PieChart, Link2, Unlink } from 'lucide-react'
+import { Briefcase, RefreshCw, Eye, TrendingUp, TrendingDown, DollarSign, PieChart, Link2, Unlink, Plus } from 'lucide-react'
 
 interface Holding {
   id: number
@@ -56,6 +56,7 @@ export default function PortfolioPage() {
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null)
   const [deleteTxnId, setDeleteTxnId] = useState('')
   const [isRefreshingAll, setIsRefreshingAll] = useState(false)
+  const [isLinking, setIsLinking] = useState(false)
   const [toast, setToast] = useState<{ type: 'success' | 'error'; message: string } | null>(null)
 
   const { data: summary, isLoading: summaryLoading, error: summaryError } = useQuery({
@@ -136,6 +137,31 @@ export default function PortfolioPage() {
     },
   })
 
+  const exchangeTokenMutation = useMutation({
+    mutationFn: ({ publicToken, metadata }: { publicToken: string; metadata: any }) =>
+      plaidApi.exchangeToken(publicToken, metadata),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['plaidAccounts'] })
+      queryClient.invalidateQueries({ queryKey: ['portfolioSummary'] })
+      setToast({
+        type: 'success',
+        message: `Successfully connected ${data.institution_name}. Importing holdings...`,
+      })
+      setTimeout(() => setToast(null), 5000)
+    },
+    onError: (error) => {
+      const message = error instanceof Error ? error.message : 'Failed to connect brokerage'
+      setToast({
+        type: 'error',
+        message: `Connection failed: ${message}`,
+      })
+      setTimeout(() => setToast(null), 5000)
+    },
+    onSettled: () => {
+      setIsLinking(false)
+    },
+  })
+
   const refreshAllMutation = useMutation({
     mutationFn: plaidApi.refreshAllAccounts,
     onMutate: () => {
@@ -176,6 +202,57 @@ export default function PortfolioPage() {
     if (id) {
       deleteHoldingMutation.mutate(id)
       setDeleteTxnId('')
+    }
+  }
+
+  const handleAddBrokerage = async () => {
+    if (!plaidConfig?.configured) {
+      setToast({
+        type: 'error',
+        message: 'Plaid is not configured. Please set PLAID_CLIENT_ID and PLAID_SECRET environment variables.',
+      })
+      setTimeout(() => setToast(null), 5000)
+      return
+    }
+
+    setIsLinking(true)
+    try {
+      // Create link token
+      const clientUserId = `user_${Date.now()}`
+      const linkTokenData = await plaidApi.createLinkToken(clientUserId)
+      
+      // Open Plaid Link in a new window using Plaid's Link library
+      const Plaid = (window as any).Plaid
+      if (!Plaid) {
+        throw new Error('Plaid Link library not loaded')
+      }
+
+      const handler = Plaid.create({
+        token: linkTokenData.link_token,
+        onSuccess: (publicToken: string, metadata: any) => {
+          exchangeTokenMutation.mutate({ publicToken, metadata })
+        },
+        onExit: (err: any, metadata: any) => {
+          setIsLinking(false)
+          if (err) {
+            setToast({
+              type: 'error',
+              message: `Plaid Link exited with error: ${err.error_message || err.error_code}`,
+            })
+            setTimeout(() => setToast(null), 5000)
+          }
+        },
+      })
+
+      handler.open()
+    } catch (error) {
+      setIsLinking(false)
+      const message = error instanceof Error ? error.message : 'Failed to initialize Plaid Link'
+      setToast({
+        type: 'error',
+        message: `Failed to connect brokerage: ${message}`,
+      })
+      setTimeout(() => setToast(null), 5000)
     }
   }
 
@@ -307,22 +384,34 @@ export default function PortfolioPage() {
       </div>
 
       {/* Linked Accounts */}
-      {accounts.length > 0 && (
-        <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
-          <div className="flex justify-between items-center mb-4">
-            <h2 className="text-lg font-semibold text-slate-900 flex items-center">
-              <Link2 className="h-5 w-5 mr-2" />
-              Connected Brokerages
-            </h2>
+      <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
+        <div className="flex justify-between items-center mb-4">
+          <h2 className="text-lg font-semibold text-slate-900 flex items-center">
+            <Link2 className="h-5 w-5 mr-2" />
+            Connected Brokerages
+          </h2>
+          <div className="flex space-x-2">
+            {accounts.length > 0 && (
+              <button
+                onClick={() => refreshAllMutation.mutate()}
+                disabled={isRefreshingAll}
+                className="flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
+              >
+                <RefreshCw className={`h-4 w-4 mr-2 ${isRefreshingAll ? 'animate-spin' : ''}`} />
+                {isRefreshingAll ? 'Syncing...' : 'Sync All'}
+              </button>
+            )}
             <button
-              onClick={() => refreshAllMutation.mutate()}
-              disabled={isRefreshingAll}
-              className="flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
+              onClick={handleAddBrokerage}
+              disabled={isLinking}
+              className="flex items-center px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 transition-colors"
             >
-              <RefreshCw className={`h-4 w-4 mr-2 ${isRefreshingAll ? 'animate-spin' : ''}`} />
-              {isRefreshingAll ? 'Syncing...' : 'Sync All Brokerages'}
+              <Plus className={`h-4 w-4 mr-2 ${isLinking ? 'animate-spin' : ''}`} />
+              {isLinking ? 'Connecting...' : 'Add New Brokerage'}
             </button>
           </div>
+        </div>
+        {accounts.length > 0 ? (
           <div className="space-y-3">
             {accounts.map((account: LinkedAccount) => (
               <div key={account.id} className="flex items-center justify-between p-4 bg-slate-50 rounded-lg">
@@ -361,8 +450,12 @@ export default function PortfolioPage() {
               </div>
             ))}
           </div>
-        </div>
-      )}
+        ) : (
+          <div className="text-center py-8 text-slate-500">
+            No brokerages connected yet. Click "Add New Brokerage" to connect your first account.
+          </div>
+        )}
+      </div>
 
       {/* Plaid Link - Simplified notice */}
       {plaidConfig && !plaidConfig.configured && (
@@ -424,21 +517,17 @@ export default function PortfolioPage() {
                         </div>
                       </td>
                       <td className="px-4 py-3">
-                        <div className="flex space-x-2">
+                        <div className="relative inline-block">
                           <button
                             onClick={() => setSelectedTicker(selectedTicker === holding.ticker ? null : holding.ticker)}
-                            className="p-1 text-blue-600 hover:bg-blue-50 rounded transition-colors"
-                            title="View Transactions"
+                            className="peer p-1 text-blue-600 hover:bg-blue-50 rounded transition-colors"
                           >
                             <Eye className="h-4 w-4" />
                           </button>
-                          <button
-                            onClick={() => setDeleteConfirm(deleteConfirm === holding.ticker ? null : holding.ticker)}
-                            className="p-1 text-red-600 hover:bg-red-50 rounded transition-colors"
-                            title="Delete"
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </button>
+                          <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 px-2 py-1 bg-slate-900 text-white text-xs rounded shadow-lg opacity-0 peer-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-50 hidden peer-hover:block">
+                            Show Transactions
+                            <div className="absolute top-full left-1/2 -translate-x-1/2 -mt-1 border-4 border-transparent border-t-slate-900"></div>
+                          </div>
                         </div>
                       </td>
                     </tr>

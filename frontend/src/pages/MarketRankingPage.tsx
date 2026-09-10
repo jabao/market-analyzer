@@ -329,10 +329,27 @@ export default function MarketRankingPage() {
               growth: 'Growth',
               financial_health: 'Financial health',
             }
+            const tooltips: Record<string, string> = {
+              valuation: 'Valuation (0-100): Average of 4 metrics—trailing P/E, forward P/E, PEG ratio, price-to-book. Each metric is percentile-ranked (0-100) against all S&P 500 stocks. Since lower is better, score = (1 - percentile) × 100. Example: a stock cheaper than 80% of peers scores 80. Dimension score = mean of all 4 metric scores. Composite = weighted average of dimensions.',
+              profitability: 'Profitability (0-100): Average of 2 metrics—profit margin and return on equity (ROE). Each metric is percentile-ranked (0-100) against all S&P 500 stocks. Higher values score higher: score = percentile × 100. Example: a stock more profitable than 70% of peers scores 70. Dimension score = mean of both metric scores. Composite = weighted average of dimensions.',
+              growth: 'Growth (0-100): Average of 2 metrics—revenue growth and earnings growth. Each metric is percentile-ranked (0-100) against all S&P 500 stocks. Higher values score higher: score = percentile × 100. Example: a stock growing faster than 60% of peers scores 60. Dimension score = mean of both metric scores. Composite = weighted average of dimensions.',
+              financial_health: 'Financial Health (0-100): Average of 2 metrics—free cash flow (higher is better, score = percentile × 100) and debt-to-equity (lower is better, score = (1 - percentile) × 100). Each metric is percentile-ranked (0-100) against all S&P 500 stocks. Dimension score = mean of both metric scores. Composite = weighted average of dimensions.',
+            }
             return (
-              <div key={key}>
-                <label className="block text-sm font-medium text-slate-700 mb-2">
+              <div key={key} className="relative">
+                <label className="block text-sm font-medium text-slate-700 mb-2 flex items-center">
                   {labels[key]}
+                  <div className="ml-1.5 relative inline-block">
+                    <span 
+                      className="peer inline-flex items-center justify-center w-4 h-4 rounded-full bg-slate-200 text-slate-600 text-xs font-bold cursor-help hover:bg-slate-300 transition-colors"
+                    >
+                      i
+                    </span>
+                    <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 p-3 bg-slate-900 text-white text-xs rounded-lg shadow-lg opacity-0 peer-hover:opacity-100 transition-opacity duration-200 pointer-events-none z-50 hidden peer-hover:block">
+                      <div className="absolute top-full left-1/2 -translate-x-1/2 -mt-1 border-4 border-transparent border-t-slate-900"></div>
+                      {tooltips[key]}
+                    </div>
+                  </div>
                 </label>
                 <input
                   type="range"

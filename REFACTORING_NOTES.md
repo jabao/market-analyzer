@@ -172,9 +172,6 @@ PLAID_CA_BUNDLE=/path/to/ca-bundle.pem
 
 The original `dashboard.py` (Streamlit) is preserved for reference but no longer the primary interface. All business logic in `app/` is reused by the FastAPI backend with minimal changes.
 
-The Streamlit app can still be run with:
-```bash
-uv run streamlit run dashboard.py
-```
+The legacy Streamlit app has been removed. The application now uses a React frontend with FastAPI backend.
 
 But the new React app is the recommended interface going forward.

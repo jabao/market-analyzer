@@ -59,12 +59,6 @@ app/
     prompts.py     # Prebuilt expert prompts for sector + stock modes
     context.py     # Builds live market context strings from S&P 500 data
     assistant.py   # Orchestrator: ties context + prompts + provider -> analysis
-dashboard.py       # Streamlit dashboard with navigation:
-                   #  - Market Ranking page (original)
-                   #  - Portfolio Tracker page (manual + Robinhood/Plaid import)
-                   #  - AI Deep Dive Assistant page (LLM modes)
-.streamlit/
-  secrets.toml.example  # Template for API keys (LLM + Plaid)
 tests/
   test_ranking.py       # Unit tests for ranking logic (no network).
   test_service.py       # Unit tests for the service layer (data source stubbed).
@@ -148,15 +142,10 @@ uv pip install -r requirements.txt
 ## Run the dashboard
 
 ```bash
-uv run streamlit run dashboard.py
-```
-
-Streamlit opens it in your browser (default http://localhost:8501).
-
 ## Robinhood Import Via Plaid
 
 The Portfolio Tracker can import current Robinhood investment holdings through Plaid
-Link. Configure Plaid credentials via environment variables or `.streamlit/secrets.toml`:
+Link. Configure Plaid credentials via environment variables:
 
 ```bash
 export PLAID_CLIENT_ID=...
@@ -258,8 +247,7 @@ A separate page (sidebar navigation **AI Deep Dive**) provides LLM-powered analy
 - **Claude 4.8:** `claude-opus-4-20250514` (fixed, displayed as Claude 4.8)
 - **GPT 5.5:** `gpt-5` (fixed, displayed as GPT 5.5)
 - Switch via UI radio between Claude 4.8 / GPT 5.5 (no model selection, temp, max tokens - fixed internally)
-- API key resolution: Saved via Save button (session) > UI paste override > `.streamlit/secrets.toml` > env vars `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`
-- Save button persists key in session_state for the session
+- API key resolution: Environment variables `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`
 - Streaming support: toggle live token streaming for better UX
 - Export: Download result as Markdown
 - Prompt transparency: Expander shows full system prompt + user template
@@ -271,7 +259,7 @@ A separate page (sidebar navigation **AI Deep Dive**) provides LLM-powered analy
 
 ### Architecture
 ```
-User UI (dashboard.py AI page)
+User UI (React frontend)
   -> MarketAssistant (assistant.py)
      -> build_full_context() (context.py): live S&P 500 + fundamentals -> strings
      -> build_sector/stock_prompt() (prompts.py): system+user prompts with injected context
@@ -284,14 +272,12 @@ User UI (dashboard.py AI page)
 2. Get API key:
    - Claude: https://console.anthropic.com
    - OpenAI: https://platform.openai.com/api-keys
-3. Provide key via one of:
+3. Provide key via environment variables:
    ```bash
    export ANTHROPIC_API_KEY=sk-ant-...
    export OPENAI_API_KEY=sk-...
-   # or create .streamlit/secrets.toml from secrets.toml.example
-   # or paste directly in UI (password field, not persisted)
    ```
-4. Run dashboard: `streamlit run dashboard.py`, navigate to AI Deep Dive
+4. Run the backend and frontend servers
 5. Choose provider/model, fill qualitative inputs, click Generate
 
 ### Cost note

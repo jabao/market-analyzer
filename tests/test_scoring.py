@@ -56,3 +56,33 @@ def test_normalize_weights_sums_to_one():
 def test_normalize_weights_all_zero_falls_back_to_equal():
     normalized = scoring.normalize_weights({d: 0 for d in scoring.DIMENSIONS})
     assert all(round(v, 6) == 0.25 for v in normalized.values())
+
+
+def test_metric_spec_matches_documented_dimensions():
+    """Verify METRIC_SPEC contains expected metrics for each dimension (used in UI tooltips)."""
+    # Valuation: lower is better (cheap)
+    valuation_metrics = dict(scoring.METRIC_SPEC["valuation"])
+    assert "trailing_pe" in valuation_metrics
+    assert "forward_pe" in valuation_metrics
+    assert "peg_ratio" in valuation_metrics
+    assert "price_to_book" in valuation_metrics
+    assert all(direction == "lower" for direction in valuation_metrics.values())
+
+    # Profitability: higher is better
+    profitability_metrics = dict(scoring.METRIC_SPEC["profitability"])
+    assert "profit_margin" in profitability_metrics
+    assert "return_on_equity" in profitability_metrics
+    assert all(direction == "higher" for direction in profitability_metrics.values())
+
+    # Growth: higher is better
+    growth_metrics = dict(scoring.METRIC_SPEC["growth"])
+    assert "revenue_growth" in growth_metrics
+    assert "earnings_growth" in growth_metrics
+    assert all(direction == "higher" for direction in growth_metrics.values())
+
+    # Financial health: mixed (FCF higher, debt lower)
+    health_metrics = dict(scoring.METRIC_SPEC["financial_health"])
+    assert "free_cash_flow" in health_metrics
+    assert "debt_to_equity" in health_metrics
+    assert health_metrics["free_cash_flow"] == "higher"
+    assert health_metrics["debt_to_equity"] == "lower"

@@ -24,8 +24,6 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Iterator
 
-import streamlit as st
-
 
 class ProviderType(str, Enum):
     CLAUDE = "claude"
@@ -112,52 +110,14 @@ class LLMProvider(ABC):
 
     @staticmethod
     def _get_saved_key_from_session(provider: ProviderType) -> str | None:
-        """Check streamlit session_state for saved API key (via Save button)."""
-        try:
-            # Keys saved via UI
-            if provider == ProviderType.CLAUDE:
-                key = st.session_state.get("saved_anthropic_key") or st.session_state.get("saved_claude_key")
-                if key and isinstance(key, str) and key.strip():
-                    return key.strip()
-            else:
-                key = st.session_state.get("saved_openai_key") or st.session_state.get("saved_gpt_key")
-                if key and isinstance(key, str) and key.strip():
-                    return key.strip()
-            # Also check dict storage
-            saved_dict = st.session_state.get("saved_api_keys", {})
-            if isinstance(saved_dict, dict):
-                if provider.value in saved_dict and saved_dict[provider.value]:
-                    return saved_dict[provider.value]
-        except Exception:
-            pass
+        """Check for saved API key (no longer used - kept for compatibility)."""
         return None
 
     @staticmethod
     def resolve_api_key(provider: ProviderType, explicit_key: str | None = None) -> str | None:
-        """Resolve API key from explicit arg, session_state, secrets, or env vars."""
+        """Resolve API key from explicit arg or env vars."""
         if explicit_key and explicit_key.strip():
             return explicit_key.strip()
-
-        # Session state (Save button)
-        saved = LLMProvider._get_saved_key_from_session(provider)
-        if saved:
-            return saved
-
-        # Try streamlit secrets safely (may fail outside streamlit context)
-        try:
-            secrets = st.secrets
-            if provider == ProviderType.CLAUDE and "ANTHROPIC_API_KEY" in secrets:
-                return secrets["ANTHROPIC_API_KEY"]
-            if provider == ProviderType.OPENAI and "OPENAI_API_KEY" in secrets:
-                return secrets["OPENAI_API_KEY"]
-            if "llm" in secrets:
-                llm_sec = secrets["llm"]
-                if provider == ProviderType.CLAUDE and "anthropic_api_key" in llm_sec:
-                    return llm_sec["anthropic_api_key"]
-                if provider == ProviderType.OPENAI and "openai_api_key" in llm_sec:
-                    return llm_sec["openai_api_key"]
-        except Exception:
-            pass
 
         env_key = "ANTHROPIC_API_KEY" if provider == ProviderType.CLAUDE else "OPENAI_API_KEY"
         return os.environ.get(env_key)
@@ -177,8 +137,7 @@ class ClaudeProvider(LLMProvider):
         api_key = self.resolve_api_key(ProviderType.CLAUDE, self.api_key)
         if not api_key:
             raise ValueError(
-                "Claude API key not found. Set ANTHROPIC_API_KEY env var, "
-                "add to .streamlit/secrets.toml, or paste and Save in the UI."
+                "Claude API key not found. Set ANTHROPIC_API_KEY env var."
             )
         return anthropic.Anthropic(api_key=api_key)
 
@@ -235,8 +194,7 @@ class OpenAIProvider(LLMProvider):
         api_key = self.resolve_api_key(ProviderType.OPENAI, self.api_key)
         if not api_key:
             raise ValueError(
-                "OpenAI API key not found. Set OPENAI_API_KEY env var, "
-                "add to .streamlit/secrets.toml, or paste and Save in the UI."
+                "OpenAI API key not found. Set OPENAI_API_KEY env var."
             )
         return openai.OpenAI(api_key=api_key)
 
